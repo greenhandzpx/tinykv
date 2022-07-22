@@ -27,6 +27,9 @@ func (r *Reader) GetCF(cf string, key []byte) ([]byte, error) {
 	iter := engine_util.NewCFIterator(cf, r.txn)
 	defer iter.Close()
 
+	//if !iter.Valid() {
+	//	fmt.Printf("GetCF: iter not valid\n")
+	//}
 	iter.Seek(key)
 	if iter.Valid() == false {
 		return nil, nil
