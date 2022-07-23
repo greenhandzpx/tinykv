@@ -1630,6 +1630,11 @@ func newNetworkWithConfig(configFunc func(*Config), peers ...stateMachine) *netw
 }
 
 func (nw *network) send(msgs ...pb.Message) {
+	// this is like a message queue
+	// every time we fetch the front msg from the queue and
+	// invoke "Step" method in "To" server
+	// then this server will
+	// generate more msgs, we put them in the queue again
 	for len(msgs) > 0 {
 		m := msgs[0]
 		p := nw.peers[m.To]
