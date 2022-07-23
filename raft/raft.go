@@ -16,8 +16,9 @@ package raft
 
 import (
 	"errors"
-
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"math/rand"
+	"sync"
 )
 
 // None is a placeholder node ID used when there is no leader.
@@ -113,6 +114,11 @@ type Raft struct {
 	Term uint64
 	Vote uint64
 
+	// all peers' id
+	peers []uint64
+
+	mu sync.Mutex
+
 	// the log
 	RaftLog *RaftLog
 
@@ -165,7 +171,28 @@ func newRaft(c *Config) *Raft {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
-	return nil
+	return &Raft{
+		id:    c.ID,
+		Term:  uint64(0),
+		peers: c.peers,
+		RaftLog: &RaftLog{
+			storage: c.Storage,
+			// not sure here
+			committed: c.Applied,
+			applied:   c.Applied,
+		},
+		Prs:   make(map[uint64]*Progress),
+		State: StateFollower,
+
+		votes: make(map[uint64]bool),
+
+		Lead: uint64(0),
+
+		heartbeatTimeout: c.HeartbeatTick,
+		electionTimeout:  c.ElectionTick,
+		heartbeatElapsed: 0,
+		electionElapsed:  0,
+	}
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
@@ -193,6 +220,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
 	// Your Code Here (2A).
+	r.State = StateCandidate
 }
 
 // becomeLeader transform this peer's state to leader
@@ -207,10 +235,43 @@ func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
 	switch r.State {
 	case StateFollower:
+		switch m.MsgType {
+		case pb.MessageType_MsgHup:
+			// election timeout, start a (new) election
+			r.election()
+		}
 	case StateCandidate:
 	case StateLeader:
 	}
 	return nil
+}
+
+func (r *Raft) election() {
+	r.Term++
+	r.Vote = r.id
+	r.electionElapsed = 0
+	r.electionTimeout = int(rand.Int31n(5) + 5)
+	for _, peer := range r.peers {
+		if peer == r.id {
+			continue
+		}
+		msg := pb.Message{
+			MsgType: pb.MessageType_MsgRequestVote,
+			To:      peer,
+			From:    r.id,
+			Term:    r.Term,
+		}
+		lastIndex, err1 := r.RaftLog.storage.LastIndex()
+		logTerm, err2 := r.RaftLog.storage.Term(lastIndex)
+		if err1 != nil || err2 != nil {
+			// TODO
+		}
+		msg.LogTerm = logTerm
+		msg.Index = lastIndex
+		r.mu.Lock()
+		r.msgs = append(r.msgs, msg)
+		r.mu.Unlock()
+	}
 }
 
 // handleAppendEntries handle AppendEntries RPC request
