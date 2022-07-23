@@ -238,19 +238,42 @@ func (r *Raft) Step(m pb.Message) error {
 		switch m.MsgType {
 		case pb.MessageType_MsgHup:
 			// election timeout, start a (new) election
-			r.election()
+			go r.election()
+		case pb.MessageType_MsgRequestVote:
+			// get a request for voting
+			go r.handleRequestVote(m)
+		default:
+
 		}
+
 	case StateCandidate:
+		switch m.MsgType {
+		case pb.MessageType_MsgRequestVoteResponse:
+			go r.handleRequestVoteResponse(m)
+		case pb.MessageType_MsgBeat:
+			go r.heartbeat(m)
+		default:
+
+		}
 	case StateLeader:
 	}
 	return nil
 }
 
 func (r *Raft) election() {
+	// not sure whether we should lock the whole function or not
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	r.Term++
 	r.Vote = r.id
 	r.electionElapsed = 0
 	r.electionTimeout = int(rand.Int31n(5) + 5)
+	for _, peer := range r.peers {
+		r.votes[peer] = false
+	}
+	r.votes[r.id] = true
+
 	for _, peer := range r.peers {
 		if peer == r.id {
 			continue
@@ -268,9 +291,117 @@ func (r *Raft) election() {
 		}
 		msg.LogTerm = logTerm
 		msg.Index = lastIndex
-		r.mu.Lock()
 		r.msgs = append(r.msgs, msg)
-		r.mu.Unlock()
+	}
+}
+
+func (r *Raft) handleRequestVote(m pb.Message) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgRequestVoteResponse,
+		To:      m.From,
+		From:    r.id,
+		Term:    m.Term,
+		Reject:  true,
+	}
+	if r.Term > m.Term {
+		msg.Term = r.Term
+		r.msgs = append(r.msgs, msg)
+		return
+	}
+
+	if r.Term < m.Term {
+		r.Term = m.Term
+		// not sure here
+		r.Vote = 0
+	}
+	lastIndex, err1 := r.RaftLog.storage.LastIndex()
+	logTerm, err2 := r.RaftLog.storage.Term(lastIndex)
+	if err1 != nil || err2 != nil {
+		// TODO
+	}
+	// whether the candidate's log is up-to-date as the receiver's log
+	var upToDate bool
+	if logTerm > m.LogTerm {
+		upToDate = false
+	} else if logTerm < m.LogTerm {
+		upToDate = true
+	} else if lastIndex > m.Index {
+		upToDate = false
+	} else {
+		upToDate = true
+	}
+	if (r.Vote == 0 || r.Vote == m.From) && upToDate {
+		m.Reject = false
+		r.Vote = m.From
+	}
+	r.msgs = append(r.msgs, msg)
+}
+
+func (r *Raft) handleRequestVoteResponse(m pb.Message) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if m.Term > r.Term {
+		// change to follower
+		r.State = StateFollower
+		r.Term = m.Term
+		return
+	}
+	if m.Term < r.Term {
+		// outdated vote
+		return
+	}
+	if m.Reject == true {
+		r.votes[m.From] = false
+		return
+	}
+
+	r.votes[m.From] = true
+	cnt := 0
+	for _, granted := range r.votes {
+		if granted {
+			cnt++
+		}
+	}
+	if cnt > len(r.peers)/2 {
+		// change to leader
+		r.State = StateLeader
+		r.Lead = r.id
+		msg := pb.Message{
+			MsgType: pb.MessageType_MsgBeat,
+			To:      r.id,
+			From:    r.id,
+			Term:    r.Term,
+		}
+		r.msgs = append(r.msgs, msg)
+	}
+}
+
+// heartbeat when a candidate change to leader,
+// it starts to send heartbeat to other servers
+func (r *Raft) heartbeat(m pb.Message) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if m.Term < r.Term {
+		// outdated msg
+		return
+	}
+
+	for _, peer := range r.peers {
+		if peer == r.id {
+			continue
+		}
+		msg := pb.Message{
+			MsgType: pb.MessageType_MsgHeartbeat,
+			To:      peer,
+			From:    r.id,
+			Term:    r.Term,
+		}
+		r.msgs = append(r.msgs, msg)
 	}
 }
 
