@@ -56,7 +56,33 @@ type RaftLog struct {
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
-	return nil
+	lastIndex, err1 := storage.LastIndex()
+	firstIndex, err2 := storage.FirstIndex()
+	if err1 != nil || err2 != nil {
+		// TODO
+	}
+	// not sure
+	entries, err := storage.Entries(firstIndex, lastIndex+1)
+	if err != nil {
+		// TODO
+	}
+	// not sure
+	// make sure the log isn't empty
+	if len(entries) == 0 {
+		entries = append(entries, pb.Entry{
+			EntryType: pb.EntryType_EntryNormal,
+			Term:      0,
+			Index:     0,
+		})
+	}
+	raftLog := &RaftLog{
+		storage: storage,
+		// not sure here
+		committed: lastIndex,
+		stabled:   lastIndex,
+		entries:   entries,
+	}
+	return raftLog
 }
 
 // We need to compact the log entries in some point of time like
@@ -64,28 +90,45 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	// TODO
 }
 
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	return nil
+	offset := l.entries[0].Index
+	return l.entries[l.stabled+1-offset:]
 }
 
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
-	return nil
+	offset := l.entries[0].Index
+	return l.entries[l.applied+1-offset : l.committed+1-offset]
 }
 
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	return 0
+	//if len(l.entries) == 0 {
+	//	return 0
+	//}
+	return l.entries[len(l.entries)-1].Index
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	return 0, nil
+	if len(l.entries) == 0 {
+		return 0, ErrCompacted
+	}
+	offset := l.entries[0].Index
+	if i < offset {
+		// TODO: maybe we cannot give the offset one?
+		return 0, ErrCompacted
+	}
+	if int(i-offset) >= len(l.entries) {
+		return 0, ErrUnavailable
+	}
+	return l.entries[i-offset].Term, nil
 }

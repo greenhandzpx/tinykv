@@ -27,6 +27,7 @@ package raft
 
 import (
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/log"
 	"reflect"
 	"sort"
 	"testing"
@@ -917,6 +918,7 @@ func acceptAndReply(m pb.Message) pb.Message {
 	if m.MsgType != pb.MessageType_MsgAppend {
 		panic("type should be MessageType_MsgAppend")
 	}
+	log.Debugf("accept&reply: m.Idx:%v", m.Index)
 	// Note: reply message don't contain LogTerm
 	return pb.Message{
 		From:    m.To,
