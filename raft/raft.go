@@ -644,23 +644,21 @@ func (r *Raft) proposeAppendEntries(m pb.Message) {
 
 	log.Debugf("%v get entries from client", r.id)
 
-	//if len(r.RaftLog.entries) == 0 {
-	//	// means this entry must be noop entry
-	//	entry := m.Entries[0]
-	//	entry.Term = r.Term
-	//	entry.Index = 0
-	//	r.RaftLog.entries = append(r.RaftLog.entries, *entry)
-	//	log.Debugf("%v get a noop entry(idx:%v) from client", r.id, m.Entries[0].Index)
-	//	m.Entries = m.Entries[1:]
-	//}
-
 	// add the entries into the leader's own log
 	for _, entry := range m.Entries {
 		entry.Term = r.Term
 		entry.Index = r.RaftLog.LastIndex() + 1
 		r.RaftLog.entries = append(r.RaftLog.entries, *entry)
 	}
+	// TODO stable
 	//r.RaftLog.storage.Append(r.RaftLog.unstableEntries())
+	//r.RaftLog.stabled = r.RaftLog.LastIndex()
+
+	if len(r.peers) == 1 {
+		// only one server, just commit the entry
+		r.RaftLog.committed = r.RaftLog.LastIndex()
+		return
+	}
 
 	// forward these entries to followers
 	// TODO
@@ -743,6 +741,8 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		return
 	}
 
+	log.Debugf("%v(log len:%v) gets valid entries(prevIdx:%v) from leader %v",
+		r.id, len(r.RaftLog.entries), m.Index, m.From)
 	offset := r.RaftLog.entries[0].Index
 	for _, entry := range m.Entries {
 		if entry.Index-offset >= uint64(len(r.RaftLog.entries)) {
@@ -750,7 +750,16 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			continue
 		}
 		if r.RaftLog.entries[entry.Index-offset].Term != entry.Term {
+			// confict entry, then truncate all entries after that
+			// and replace them with the leader's entries
+			log.Debugf("%v conflict entry: idx:%v, fterm:%v lterm:%v",
+				r.id, entry.Index, r.RaftLog.entries[entry.Index-offset].Term, entry.Term)
 			r.RaftLog.entries[entry.Index-offset] = *entry
+			if r.RaftLog.stabled >= entry.Index {
+				// we should modify the stable index because this entry shouldn't be stable
+				r.RaftLog.stabled = entry.Index - 1
+			}
+			r.RaftLog.entries = r.RaftLog.entries[:entry.Index-offset+1]
 		}
 	}
 	// modify the commit index
@@ -760,11 +769,14 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		} else {
 			r.RaftLog.committed = r.RaftLog.LastIndex()
 		}
+		log.Debugf("follower %v update commit idx:%v", r.id, r.RaftLog.committed)
 	}
 
+	// TODO stable
+	//r.RaftLog.stabled = r.RaftLog.LastIndex()
 	//r.RaftLog.storage.Append(r.RaftLog.unstableEntries())
-	msg.LogTerm = m.Entries[len(m.Entries)-1].Term
-	msg.Index = m.Entries[len(m.Entries)-1].Index
+	msg.LogTerm = r.RaftLog.entries[len(r.RaftLog.entries)-1].Term
+	msg.Index = r.RaftLog.entries[len(r.RaftLog.entries)-1].Index
 	r.msgs = append(r.msgs, msg)
 }
 
@@ -787,12 +799,11 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 	//	return
 	//}
 
-	log.Debugf("%v modify follower %v, nextIdx:%v", r.id, m.From, m.Index)
+	log.Debugf("%v modify follower %v, nextIdx:%v", r.id, m.From, m.Index+1)
 	r.Prs[m.From].Match = m.Index
 	r.Prs[m.From].Next = m.Index + 1
 
 	// check whether there exists any entry that can be committed
-	// TODO
 	find := false
 	for i := len(r.RaftLog.entries) - 1; i >= 0; i-- {
 		entry := r.RaftLog.entries[i]
@@ -802,8 +813,11 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		if entry.Index <= r.RaftLog.committed {
 			break
 		}
-		cnt := 0
-		for _, pr := range r.Prs {
+		cnt := 1
+		for peer, pr := range r.Prs {
+			if peer == r.id {
+				continue
+			}
 			if pr.Match >= entry.Index {
 				cnt++
 			}
@@ -811,8 +825,10 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		if cnt > len(r.peers)/2 {
 			find = true
 			r.RaftLog.committed = entry.Index
+			log.Debugf("leader %v advance commit idx: %v", r.id, r.RaftLog.committed)
 			break
 		}
+		log.Debugf("%v idx:%v cnt %v", r.id, entry.Index, cnt)
 	}
 	if find {
 		// broadcast the followers to advance commit index
