@@ -198,6 +198,8 @@ func newRaft(c *Config) *Raft {
 	// init the log
 	raftLog := newLog(c.Storage)
 	raftLog.applied = c.Applied
+	// not sure here
+	raftLog.committed = c.Applied
 	raft.RaftLog = raftLog
 	return raft
 }
@@ -206,11 +208,12 @@ func newRaft(c *Config) *Raft {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
-	if r.RaftLog.LastIndex() < r.Prs[to].Next {
-		log.Debugf("%v's log too short(lastIdx:%v), follower %v's nextIdx:%v",
-			r.id, r.RaftLog.LastIndex(), to, r.Prs[to].Next)
-		return false
-	}
+	//if r.RaftLog.LastIndex() < r.Prs[to].Next {
+	//	log.Debugf("%v's log too short(lastIdx:%v), follower %v's nextIdx:%v",
+	//		r.id, r.RaftLog.LastIndex(), to, r.Prs[to].Next)
+	//	return false
+	//}
+
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
 		To:      to,
@@ -218,23 +221,29 @@ func (r *Raft) sendAppend(to uint64) bool {
 		Term:    r.Term,
 		Commit:  r.RaftLog.committed,
 	}
-	logTerm, err := r.RaftLog.Term(r.Prs[to].Next - 1)
-	if err != nil {
-		// TODO
+	if r.RaftLog.LastIndex() < r.Prs[to].Next {
+		// we may just send the commit index msg
+		msg.LogTerm = r.RaftLog.entries[len(r.RaftLog.entries)-1].Term
+		msg.Index = r.RaftLog.LastIndex()
+
+	} else {
+		logTerm, err := r.RaftLog.Term(r.Prs[to].Next - 1)
+		if err != nil {
+			// TODO
+		}
+		msg.LogTerm = logTerm
+		msg.Index = r.Prs[to].Next - 1
 	}
-	//if r.Prs[to].Match == r.Prs[to].Next {
-	//	// means this follower needs a noop entry
-	//	logTerm = 0
-	//}
-	msg.LogTerm = logTerm
-	msg.Index = r.Prs[to].Next - 1
-	//msg.PrevIndex = r.Prs[to].Match
+
 	offset := r.RaftLog.entries[0].Index
 	for i := r.Prs[to].Next - offset; i < uint64(len(r.RaftLog.entries)); i++ {
 		msg.Entries = append(msg.Entries, &r.RaftLog.entries[i])
 	}
-	log.Debugf("%v send append entries(idx:%v) to %v",
-		r.id, msg.Entries[0].Index, to)
+
+	if len(msg.Entries) > 0 {
+		log.Debugf("%v send append entries(idx:%v) to %v",
+			r.id, msg.Entries[0].Index, to)
+	}
 	r.msgs = append(r.msgs, msg)
 	return true
 }
@@ -255,8 +264,8 @@ func (r *Raft) sendHeartbeat(to uint64) {
 func (r *Raft) tick() {
 	// Your Code Here (2A).
 	// not sure whether we should lock here
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	//r.mu.Lock()
+	//defer r.mu.Unlock()
 
 	r.electionElapsed++
 	r.heartbeatElapsed++
@@ -269,12 +278,12 @@ func (r *Raft) tick() {
 			Term:    r.Term,
 		}
 		//r.msgs = append(r.msgs, msg)
-		r.mu.Unlock()
+		//r.mu.Unlock()
 		err := r.Step(msg)
 		if err != nil {
 			// TODO: handle err
 		}
-		r.mu.Lock()
+		//r.mu.Lock()
 	}
 
 	//if r.State != StateLeader {
@@ -288,12 +297,12 @@ func (r *Raft) tick() {
 			Term:    r.Term,
 		}
 		//r.msgs = append(r.msgs, msg)
-		r.mu.Unlock()
+		//r.mu.Unlock()
 		err := r.Step(msg)
 		if err != nil {
 			// TODO: handle err
 		}
-		r.mu.Lock()
+		//r.mu.Lock()
 	}
 }
 
@@ -326,7 +335,7 @@ func (r *Raft) becomeCandidate() {
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
-	log.Debugf("%v becomes leader", r.id)
+	log.Debugf("%v becomes leader, term:%v", r.id, r.Term)
 	r.State = StateLeader
 	r.Lead = r.id
 	//msg := pb.Message{
@@ -340,7 +349,11 @@ func (r *Raft) becomeLeader() {
 	//r.heartbeat(msg)
 
 	for _, peer := range r.peers {
-		r.Prs[peer].Match = 0
+		if peer == r.id {
+			r.Prs[peer].Match = r.RaftLog.LastIndex()
+		} else {
+			r.Prs[peer].Match = 0
+		}
 		r.Prs[peer].Next = r.RaftLog.LastIndex() + 1
 	}
 
@@ -440,8 +453,8 @@ func (r *Raft) Step(m pb.Message) error {
 
 func (r *Raft) election() {
 	// not sure whether we should lock the whole function or not
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	//r.mu.Lock()
+	//defer r.mu.Unlock()
 
 	//log.Debugf("%v starts election", r.id)
 	if r.State != StateCandidate {
@@ -474,11 +487,8 @@ func (r *Raft) election() {
 			From:    r.id,
 			Term:    r.Term,
 		}
-		lastIndex, err1 := r.RaftLog.storage.LastIndex()
-		logTerm, err2 := r.RaftLog.storage.Term(lastIndex)
-		if err1 != nil || err2 != nil {
-			// TODO
-		}
+		lastIndex := r.RaftLog.LastIndex()
+		logTerm, _ := r.RaftLog.Term(lastIndex)
 		msg.LogTerm = logTerm
 		msg.Index = lastIndex
 		//log.Debugf("send vote")
@@ -487,8 +497,8 @@ func (r *Raft) election() {
 }
 
 func (r *Raft) handleRequestVote(m pb.Message) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	//r.mu.Lock()
+	//defer r.mu.Unlock()
 
 	log.Debugf("%v request a vote from %v", m.From, r.id)
 	msg := pb.Message{
@@ -547,8 +557,8 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 }
 
 func (r *Raft) handleRequestVoteResponse(m pb.Message) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	//r.mu.Lock()
+	//defer r.mu.Unlock()
 
 	if m.Term > r.Term {
 		// change to follower
@@ -556,6 +566,11 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 		r.Term = m.Term
 		return
 	}
+
+	if r.State != StateCandidate {
+		return
+	}
+
 	if m.Term < r.Term {
 		// outdated vote
 		return
@@ -573,18 +588,19 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 		}
 	}
 	if cnt > len(r.peers)/2 {
+		//r.mu.Unlock()
 		// change to leader
 		r.becomeLeader()
 		// TODO add a noop entry
-
+		//r.mu.Lock()
 	}
 }
 
 // heartbeat when a candidate change to leader,
 // it starts to send heartbeat to other servers
 func (r *Raft) heartbeat(m pb.Message) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	//r.mu.Lock()
+	//defer r.mu.Unlock()
 
 	//if m.Term < r.Term {
 	//	// outdated msg
@@ -603,8 +619,8 @@ func (r *Raft) heartbeat(m pb.Message) {
 // handleHeartbeat handle Heartbeat RPC request
 func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	//r.mu.Lock()
+	//defer r.mu.Unlock()
 
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgHeartbeatResponse,
@@ -629,18 +645,23 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 }
 
 func (r *Raft) handleHeartbeatResponse(m pb.Message) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	//r.mu.Lock()
+	//defer r.mu.Unlock()
 
 	if m.Term > r.Term {
 		r.becomeFollower(m.Term, 0)
 	}
+
+	// every time we receive a heartbeat response, we
+	// try to send that follower a append entry
+	// TODO figout out a more efficient way
+	r.sendAppend(m.From)
 }
 
 // proposeAppendEntries the client propose entries
 func (r *Raft) proposeAppendEntries(m pb.Message) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	//r.mu.Lock()
+	//defer r.mu.Unlock()
 
 	log.Debugf("%v get entries from client", r.id)
 
@@ -650,6 +671,9 @@ func (r *Raft) proposeAppendEntries(m pb.Message) {
 		entry.Index = r.RaftLog.LastIndex() + 1
 		r.RaftLog.entries = append(r.RaftLog.entries, *entry)
 	}
+
+	r.Prs[r.id].Match = r.RaftLog.LastIndex()
+	r.Prs[r.id].Next = r.RaftLog.LastIndex() + 1
 	// TODO stable
 	//r.RaftLog.storage.Append(r.RaftLog.unstableEntries())
 	//r.RaftLog.stabled = r.RaftLog.LastIndex()
@@ -661,7 +685,10 @@ func (r *Raft) proposeAppendEntries(m pb.Message) {
 	}
 
 	// forward these entries to followers
-	// TODO
+	r.broadcastAppendEntries()
+}
+
+func (r *Raft) broadcastAppendEntries() {
 	for _, peer := range r.peers {
 		if peer == r.id {
 			continue
@@ -673,8 +700,8 @@ func (r *Raft) proposeAppendEntries(m pb.Message) {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	//r.mu.Lock()
+	//defer r.mu.Unlock()
 
 	log.Debugf("%v get an append entry from %v", r.id, m.From)
 	msg := pb.Message{
@@ -692,7 +719,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	}
 
 	r.resetElectionTimer()
-	log.Debugf("%v reset timer because of appendEntries", r.id)
+	//log.Debugf("%v reset timer because of appendEntries", r.id)
 	r.becomeFollower(m.Term, m.From)
 
 	// TODO: replicate logs
@@ -781,8 +808,8 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 }
 
 func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	//r.mu.Lock()
+	//defer r.mu.Unlock()
 
 	if m.Term > r.Term {
 		r.becomeFollower(m.Term, 0)
@@ -793,11 +820,16 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		return
 	}
 
-	//if m.Reject {
-	//	r.Prs[m.From].Next = m.Index
-	//	r.Prs[m.From].Match = m.Index - 1
-	//	return
-	//}
+	if m.Reject {
+		if m.Index == 0 {
+			r.Prs[m.From].Next = 1
+		} else {
+			r.Prs[m.From].Next = m.Index
+		}
+		log.Debugf("%v is rejected, modify follower %v, nextIdx:%v", r.id, m.From, r.Prs[m.From].Next)
+		r.sendAppend(m.From)
+		return
+	}
 
 	log.Debugf("%v modify follower %v, nextIdx:%v", r.id, m.From, m.Index+1)
 	r.Prs[m.From].Match = m.Index
@@ -833,6 +865,10 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 	if find {
 		// broadcast the followers to advance commit index
 		// TODO
+		// not sure
+		//r.mu.Unlock()
+		r.broadcastAppendEntries()
+		//r.mu.Lock()
 	}
 
 }

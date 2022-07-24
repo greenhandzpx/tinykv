@@ -81,9 +81,9 @@ func newLog(storage Storage) *RaftLog {
 	raftLog := &RaftLog{
 		storage: storage,
 		// not sure here
-		committed: lastIndex,
-		stabled:   lastIndex,
-		entries:   entries,
+		//committed: lastIndex,
+		stabled: lastIndex,
+		entries: entries,
 	}
 	return raftLog
 }
