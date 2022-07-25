@@ -141,6 +141,9 @@ type Raft struct {
 	// the num of request vote reply
 	voteRespCnt int
 
+	// the server has advanced the commit index
+	commitAdvance bool
+
 	// heartbeat interval, should send
 	heartbeatTimeout int
 	// baseline of election interval
@@ -706,6 +709,7 @@ func (r *Raft) proposeAppendEntries(m pb.Message) {
 	if len(r.peers) == 1 {
 		// only one server, just commit the entry
 		r.RaftLog.committed = r.RaftLog.LastIndex()
+		r.commitAdvance = true
 		return
 	}
 
@@ -874,6 +878,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			}
 		}
 		r.RaftLog.committed = commit
+		r.commitAdvance = true
 		log.Debugf("follower %v update commit idx:%v", r.id, r.RaftLog.committed)
 	}
 
@@ -937,6 +942,7 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		if cnt > len(r.peers)/2 {
 			find = true
 			r.RaftLog.committed = entry.Index
+			r.commitAdvance = true
 			log.Debugf("leader %v advance commit idx: %v", r.id, r.RaftLog.committed)
 			break
 		}

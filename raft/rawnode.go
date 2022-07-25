@@ -70,12 +70,18 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+
+	// store the last time client call Ready()'s commit index
+	lastCommit uint64
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
-	return nil, nil
+	rawNode := &RawNode{
+		Raft: newRaft(config),
+	}
+	return rawNode, nil
 }
 
 // Tick advances the internal logical clock by a single tick.
@@ -143,19 +149,39 @@ func (rn *RawNode) Step(m pb.Message) error {
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	return Ready{}
+	ready := Ready{}
+
+	if rn.Raft.commitAdvance {
+		ready.SoftState = &SoftState{}
+		ready.Lead = rn.Raft.Lead
+		ready.RaftState = rn.Raft.State
+
+		ready.Term = rn.Raft.Term
+		ready.Vote = rn.Raft.Vote
+		ready.Commit = rn.Raft.RaftLog.committed
+	}
+
+	ready.Entries = rn.Raft.RaftLog.unstableEntries()
+	ready.CommittedEntries = rn.Raft.RaftLog.nextEnts()
+
+	rn.lastCommit = ready.Commit
+	rn.Raft.commitAdvance = false
+
+	return ready
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
-	return false
+	return rn.Raft.commitAdvance
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
+	rn.Raft.RaftLog.applied = rn.lastCommit
+	rn.Raft.RaftLog.stabled = rn.lastCommit
 }
 
 // GetProgress return the Progress of this node and its peers, if this
