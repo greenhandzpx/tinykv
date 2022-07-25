@@ -69,7 +69,7 @@ type Storage interface {
 	// snapshot and call Snapshot later.
 	Snapshot() (pb.Snapshot, error)
 
-	Append(entries []pb.Entry) error
+	//Append(entries []pb.Entry) error
 }
 
 // MemoryStorage implements the Storage interface backed by an
@@ -112,6 +112,8 @@ func (ms *MemoryStorage) SetHardState(st pb.HardState) error {
 func (ms *MemoryStorage) Entries(lo, hi uint64) ([]pb.Entry, error) {
 	ms.Lock()
 	defer ms.Unlock()
+
+	log.Debugf("sto entry size:%v, 0.idx:%v", len(ms.ents), ms.ents[0].Index)
 	offset := ms.ents[0].Index
 	if lo <= offset {
 		return nil, ErrCompacted

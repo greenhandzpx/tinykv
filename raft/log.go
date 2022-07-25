@@ -64,20 +64,26 @@ func newLog(storage Storage) *RaftLog {
 	if err1 != nil || err2 != nil {
 		// TODO
 	}
+
+	//entries := []pb.Entry{pb.Entry{
+	//	EntryType: pb.EntryType_EntryNormal,
+	//	Term:      0,
+	//	Index:     0,
+	//}}
 	// not sure
 	entries, err := storage.Entries(firstIndex, lastIndex+1)
 	if err != nil {
 		// TODO
 	}
-	// not sure
-	// make sure the log isn't empty
-	if len(entries) == 0 {
-		entries = append(entries, pb.Entry{
-			EntryType: pb.EntryType_EntryNormal,
-			Term:      0,
-			Index:     0,
-		})
-	}
+	//// make sure the log isn't empty
+	//if len(entries) == 0 {
+	//	entries = append(entries, pb.Entry{
+	//		EntryType: pb.EntryType_EntryNormal,
+	//		Term:      0,
+	//		Index:     0,
+	//	})
+	//}
+
 	raftLog := &RaftLog{
 		storage: storage,
 		// not sure here
@@ -107,6 +113,9 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
+	if len(l.entries) == 0 {
+		return l.entries
+	}
 	offset := l.entries[0].Index
 	return l.entries[l.applied+1-offset : l.committed+1-offset]
 }
@@ -114,9 +123,9 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	//if len(l.entries) == 0 {
-	//	return 0
-	//}
+	if len(l.entries) == 0 {
+		return 0
+	}
 	return l.entries[len(l.entries)-1].Index
 }
 
@@ -124,7 +133,10 @@ func (l *RaftLog) LastIndex() uint64 {
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
 	if len(l.entries) == 0 {
-		return 0, ErrCompacted
+		if i == 0 {
+			return 0, nil
+		}
+		return 0, ErrUnavailable
 	}
 	offset := l.entries[0].Index
 	if i < offset {

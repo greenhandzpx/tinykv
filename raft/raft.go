@@ -138,6 +138,9 @@ type Raft struct {
 	// the leader id
 	Lead uint64
 
+	// the num of request vote reply
+	voteRespCnt int
+
 	// heartbeat interval, should send
 	heartbeatTimeout int
 	// baseline of election interval
@@ -195,11 +198,14 @@ func newRaft(c *Config) *Raft {
 		raft.Prs[peer] = &Progress{}
 	}
 
+	hardState, _, _ := c.Storage.InitialState()
+	raft.Term = hardState.Term
+	raft.Vote = hardState.Vote
+
 	// init the log
 	raftLog := newLog(c.Storage)
 	raftLog.applied = c.Applied
-	// not sure here
-	raftLog.committed = c.Applied
+	raftLog.committed = hardState.Commit
 	raft.RaftLog = raftLog
 	return raft
 }
@@ -223,6 +229,8 @@ func (r *Raft) sendAppend(to uint64) bool {
 	}
 	if r.RaftLog.LastIndex() < r.Prs[to].Next {
 		// we may just send the commit index msg
+		// give the latest entry to the follower to inform it to update commit index
+		msg.Entries = append(msg.Entries, &r.RaftLog.entries[len(r.RaftLog.entries)-1])
 		msg.LogTerm = r.RaftLog.entries[len(r.RaftLog.entries)-1].Term
 		msg.Index = r.RaftLog.LastIndex()
 
@@ -233,11 +241,11 @@ func (r *Raft) sendAppend(to uint64) bool {
 		}
 		msg.LogTerm = logTerm
 		msg.Index = r.Prs[to].Next - 1
-	}
 
-	offset := r.RaftLog.entries[0].Index
-	for i := r.Prs[to].Next - offset; i < uint64(len(r.RaftLog.entries)); i++ {
-		msg.Entries = append(msg.Entries, &r.RaftLog.entries[i])
+		offset := r.RaftLog.entries[0].Index
+		for i := r.Prs[to].Next - offset; i < uint64(len(r.RaftLog.entries)); i++ {
+			msg.Entries = append(msg.Entries, &r.RaftLog.entries[i])
+		}
 	}
 
 	if len(msg.Entries) > 0 {
@@ -309,6 +317,7 @@ func (r *Raft) tick() {
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
+	log.Debugf("%v becomes follower, term %v", r.id, r.Term)
 	r.Lead = lead
 	r.Term = term
 	r.State = StateFollower
@@ -455,7 +464,7 @@ func (r *Raft) election() {
 	// not sure whether we should lock the whole function or not
 	//r.mu.Lock()
 	//defer r.mu.Unlock()
-
+	log.Debugf("%v starts election, term %v", r.id, r.Term)
 	//log.Debugf("%v starts election", r.id)
 	if r.State != StateCandidate {
 		r.State = StateCandidate
@@ -465,6 +474,8 @@ func (r *Raft) election() {
 	r.Term++
 	r.Vote = r.id
 	r.resetElectionTimer()
+	r.voteRespCnt = 1
+
 	//log.Debugf("%v reset timer because of election, term:%v", r.id, r.Term)
 	for _, peer := range r.peers {
 		r.votes[peer] = false
@@ -492,6 +503,7 @@ func (r *Raft) election() {
 		msg.LogTerm = logTerm
 		msg.Index = lastIndex
 		//log.Debugf("send vote")
+		log.Debugf("%v(term:%v) send a request vote to %v", r.id, r.Term, peer)
 		r.msgs = append(r.msgs, msg)
 	}
 }
@@ -500,7 +512,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 	//r.mu.Lock()
 	//defer r.mu.Unlock()
 
-	log.Debugf("%v request a vote from %v", m.From, r.id)
+	log.Debugf("%v(t:%v) request a vote from %v(t:%v)", m.From, m.Term, r.id, r.Term)
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgRequestVoteResponse,
 		To:      m.From,
@@ -551,6 +563,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		r.Vote = m.From
 		// when granting vote, reset timer
 		r.resetElectionTimer()
+		r.Lead = 0
 		log.Debugf("%v reset timer because of granting", r.id)
 	}
 	r.msgs = append(r.msgs, msg)
@@ -562,12 +575,14 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 
 	if m.Term > r.Term {
 		// change to follower
+		log.Debugf("%v change from candidate to follower", r.id)
 		r.State = StateFollower
 		r.Term = m.Term
 		return
 	}
 
 	if r.State != StateCandidate {
+		log.Debugf("%v isn't candidata anymore, term %v", r.id, r.Term)
 		return
 	}
 
@@ -575,11 +590,19 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 		// outdated vote
 		return
 	}
+
+	r.voteRespCnt++
+
 	if m.Reject == true {
+		log.Debugf("%v(term:%v) cannot get a vote from %v", r.id, r.Term, m.From)
 		r.votes[m.From] = false
+		if r.voteRespCnt == len(r.peers) {
+			// all servers have replied but still not become leader
+			r.State = StateFollower
+		}
 		return
 	}
-	log.Debugf("%v gets a vote from %v", r.id, m.From)
+	log.Debugf("%v(term:%v) gets a vote from %v", r.id, r.Term, m.From)
 	r.votes[m.From] = true
 	cnt := 0
 	for _, granted := range r.votes {
@@ -591,9 +614,11 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 		//r.mu.Unlock()
 		// change to leader
 		r.becomeLeader()
+		return
 		// TODO add a noop entry
 		//r.mu.Lock()
 	}
+
 }
 
 // heartbeat when a candidate change to leader,
@@ -720,7 +745,15 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 
 	r.resetElectionTimer()
 	//log.Debugf("%v reset timer because of appendEntries", r.id)
-	r.becomeFollower(m.Term, m.From)
+	if m.Term > r.Term {
+		r.Term = m.Term
+	}
+	if r.State != StateFollower {
+		r.becomeFollower(m.Term, m.From)
+	}
+	if r.Lead != m.From {
+		r.Lead = m.From
+	}
 
 	// TODO: replicate logs
 	//if m.Entries[0].Index == 0 {
@@ -752,15 +785,34 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			// the same index entry's term doesn't match
 			// get the first index whose term is prevTerm
 			// to speed up replicating
-			offset := r.RaftLog.entries[0].Index
-			for i := m.Index - offset; i > 0; i-- {
-				msg.Index = r.RaftLog.entries[i].Index
-				if r.RaftLog.entries[i].Term != prevTerm {
-					break
+			if len(r.RaftLog.entries) == 0 {
+				msg.Index = r.RaftLog.LastIndex()
+			} else {
+				offset := r.RaftLog.entries[0].Index
+				for i := m.Index - offset; i > 0; i-- {
+					msg.Index = r.RaftLog.entries[i].Index
+					if r.RaftLog.entries[i].Term != prevTerm {
+						break
+					}
 				}
 			}
 		}
 	}
+	//prevTerm, _ := r.RaftLog.Term(m.Index)
+	//if prevTerm == m.LogTerm {
+	//	match = true
+	//} else {
+	//	// the same index entry's term doesn't match
+	//	// get the first index whose term is prevTerm
+	//	// to speed up replicating
+	//	offset := r.RaftLog.entries[0].Index
+	//	for i := m.Index - offset; i > 0; i-- {
+	//		msg.Index = r.RaftLog.entries[i].Index
+	//		if r.RaftLog.entries[i].Term != prevTerm {
+	//			break
+	//		}
+	//	}
+	//}
 
 	if !match {
 		msg.Reject = true
@@ -768,11 +820,22 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		return
 	}
 
-	log.Debugf("%v(log len:%v) gets valid entries(prevIdx:%v) from leader %v",
-		r.id, len(r.RaftLog.entries), m.Index, m.From)
-	offset := r.RaftLog.entries[0].Index
+	log.Debugf("%v(log len:%v) gets valid entries(prevIdx:%v, len:%v) from leader %v",
+		r.id, len(r.RaftLog.entries), m.Index, len(m.Entries), m.From)
+	var offset uint64
+	if len(r.RaftLog.entries) == 0 {
+		offset = 0
+	} else {
+		offset = r.RaftLog.entries[0].Index
+	}
+
+	//if len(m.Entries) == 0 {
+	//	// we should truncate the logs after the prevIndex
+	//	r.RaftLog.entries = r.RaftLog.entries[:m.Index-offset+1]
+	//} else {
 	for _, entry := range m.Entries {
 		if entry.Index-offset >= uint64(len(r.RaftLog.entries)) {
+			log.Debugf("follower %v append an entry(idx:%v)", r.id, entry.Index)
 			r.RaftLog.entries = append(r.RaftLog.entries, *entry)
 			continue
 		}
@@ -789,21 +852,38 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			r.RaftLog.entries = r.RaftLog.entries[:entry.Index-offset+1]
 		}
 	}
+	//}
+
 	// modify the commit index
+	// TODO here is quite strange: should be paid attention to
 	if m.Commit > r.RaftLog.committed {
-		if m.Commit < r.RaftLog.LastIndex() {
-			r.RaftLog.committed = m.Commit
+		var commit uint64
+		if len(m.Entries) == 0 {
+			// if no new entry in the msg
+			// then we should compare the commitIndex with prevIndex
+			if m.Commit < m.Index {
+				commit = m.Commit
+			} else {
+				commit = m.Index
+			}
 		} else {
-			r.RaftLog.committed = r.RaftLog.LastIndex()
+			if m.Commit < m.Entries[len(m.Entries)-1].Index {
+				commit = m.Commit
+			} else {
+				commit = m.Entries[len(m.Entries)-1].Index
+			}
 		}
+		r.RaftLog.committed = commit
 		log.Debugf("follower %v update commit idx:%v", r.id, r.RaftLog.committed)
 	}
 
 	// TODO stable
 	//r.RaftLog.stabled = r.RaftLog.LastIndex()
 	//r.RaftLog.storage.Append(r.RaftLog.unstableEntries())
-	msg.LogTerm = r.RaftLog.entries[len(r.RaftLog.entries)-1].Term
-	msg.Index = r.RaftLog.entries[len(r.RaftLog.entries)-1].Index
+	//msg.LogTerm = r.RaftLog.entries[len(r.RaftLog.entries)-1].Term
+	//msg.Index = r.RaftLog.entries[len(r.RaftLog.entries)-1].Index
+	msg.LogTerm, _ = r.RaftLog.Term(r.RaftLog.LastIndex())
+	msg.Index = r.RaftLog.LastIndex()
 	r.msgs = append(r.msgs, msg)
 }
 

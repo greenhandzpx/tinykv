@@ -154,6 +154,7 @@ func TestLeaderElectionOverwriteNewerLogs2AB(t *testing.T) {
 	// Node 1 campaigns. The election fails because a quorum of nodes
 	// know about the election that already happened at term 2. Node 1's
 	// term is pushed ahead to 2.
+	log.Debugf("step1")
 	n.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 	sm1 := n.peers[1].(*Raft)
 	if sm1.State != StateFollower {
@@ -163,6 +164,7 @@ func TestLeaderElectionOverwriteNewerLogs2AB(t *testing.T) {
 		t.Errorf("term = %d, want 2", sm1.Term)
 	}
 
+	log.Debugf("step2")
 	// Node 1 campaigns again with a higher term. This time it succeeds.
 	n.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 	if sm1.State != StateLeader {
@@ -178,6 +180,7 @@ func TestLeaderElectionOverwriteNewerLogs2AB(t *testing.T) {
 		sm := n.peers[i].(*Raft)
 		entries := sm.RaftLog.entries
 		if len(entries) != 2 {
+			log.Debugf("entry 0 term %v idx %v", entries[0].Term, entries[0].Index)
 			t.Fatalf("node %d: len(entries) == %d, want 2", i, len(entries))
 		}
 		if entries[0].Term != 1 {
@@ -299,6 +302,7 @@ func TestLogReplication2AB(t *testing.T) {
 				}
 			}
 			for k, m := range props {
+				log.Debugf("#%v", i)
 				if !bytes.Equal(ents[k].Data, m.Entries[0].Data) {
 					t.Errorf("#%d.%d: data = %d, want %d", i, j, ents[k].Data, m.Entries[0].Data)
 				}
@@ -410,6 +414,7 @@ func TestDuelingCandidates2AB(t *testing.T) {
 	nt.send(pb.Message{From: 3, To: 3, MsgType: pb.MessageType_MsgHup})
 
 	wlog := newLog(newMemoryStorageWithEnts([]pb.Entry{{}, {Data: nil, Term: 1, Index: 1}}))
+	//wlog := newLog(newMemoryStorageWithEnts([]pb.Entry{{Data: nil, Term: 0, Index: 0}, {Data: nil, Term: 1, Index: 1}}))
 	wlog.committed = 1
 	tests := []struct {
 		sm      *Raft
@@ -433,7 +438,8 @@ func TestDuelingCandidates2AB(t *testing.T) {
 		if sm, ok := nt.peers[1+uint64(i)].(*Raft); ok {
 			l := ltoa(sm.RaftLog)
 			if g := diffu(base, l); g != "" {
-				log.Debugf("peers:%v", 1+uint64(i))
+				log.Debugf("peers:%v, base.log.len:%v sm.log.len:%v",
+					1+uint64(i), len(tt.raftLog.entries), len(sm.RaftLog.entries))
 				t.Errorf("#%d: diff:\n%s", i, g)
 			}
 		} else {
