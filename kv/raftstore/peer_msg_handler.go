@@ -225,7 +225,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 
-	DPrintf("%v get a command %v", d.PeerId(), msg.Requests[0].CmdType)
+	//DPrintf("%v get a command %v", d.PeerId(), msg.Requests[0].CmdType)
 
 	// Your Code Here (2B).
 	raftMsg := eraftpb.Message{
@@ -255,7 +255,8 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		index: entry.Index,
 		cb:    cb,
 	}
-	log.Debugf("leader %v get a command, prop term %v idx %v", d.PeerId(), prop.term, prop.index)
+	log.Debugf("leader %v get a %v command, prop term %v idx %v",
+		d.PeerId(), msg.Requests[0].CmdType, prop.term, prop.index)
 	d.proposals = append(d.proposals, &prop)
 }
 
