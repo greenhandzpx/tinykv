@@ -308,10 +308,22 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
+	for _, entry := range entries {
+		key := meta.RaftLogKey(ps.region.Id, entry.Index)
+		if oldEntry, err := meta.GetRaftEntry(ps.Engines.Raft, ps.region.Id, entry.Index); err == nil {
+			if oldEntry.Term != entry.Term {
+				// means that this index already has en entry, that may be wrong entry
+				raftWB.DeleteMeta(key)
+			}
+		}
+		if err := raftWB.SetMeta(key, &entry); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-// Apply the peer with given snapshot
+// ApplySnapshot Apply the peer with given snapshot
 func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_util.WriteBatch, raftWB *engine_util.WriteBatch) (*ApplySnapResult, error) {
 	log.Infof("%v begin to apply snapshot", ps.Tag)
 	snapData := new(rspb.RaftSnapshotData)
@@ -326,11 +338,33 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	return nil, nil
 }
 
-// Save memory states to disk.
+// SaveReadyState Save memory states to disk.
 // Do not modify ready in this function, this is a requirement to advance the ready object properly later.
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
+	raftWB := engine_util.WriteBatch{}
+	if err := ps.Append(ready.Entries, &raftWB); err != nil {
+		return nil, err
+	}
+	// update raft local state
+	ps.raftState.HardState.Term = ready.Term
+	ps.raftState.HardState.Commit = ready.Commit
+	ps.raftState.HardState.Vote = ready.Vote
+	if len(ready.Entries) > 0 {
+		ps.raftState.LastIndex = ready.Entries[len(ready.Entries)-1].Index
+		ps.raftState.LastTerm = ready.Entries[len(ready.Entries)-1].Term
+	}
+
+	raftStateKey := meta.RaftStateKey(ps.region.Id)
+	if err := raftWB.SetMeta(raftStateKey, ps.raftState); err != nil {
+		return nil, err
+	}
+
+	// TODO update applied index
+	if err := raftWB.WriteToDB(ps.Engines.Raft); err != nil {
+		return nil, err
+	}
 	return nil, nil
 }
 

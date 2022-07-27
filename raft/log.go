@@ -15,7 +15,6 @@
 package raft
 
 import (
-	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -53,6 +52,8 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
+	// when created, the initial term
+	lastTerm uint64
 }
 
 // newLog returns log using the given storage. It recovers the log
@@ -65,30 +66,17 @@ func newLog(storage Storage) *RaftLog {
 		// TODO
 	}
 
-	//entries := []pb.Entry{pb.Entry{
-	//	EntryType: pb.EntryType_EntryNormal,
-	//	Term:      0,
-	//	Index:     0,
-	//}}
 	// not sure
 	entries, err := storage.Entries(firstIndex, lastIndex+1)
 	if err != nil {
 		// TODO
 	}
-	//// make sure the log isn't empty
-	//if len(entries) == 0 {
-	//	entries = append(entries, pb.Entry{
-	//		EntryType: pb.EntryType_EntryNormal,
-	//		Term:      0,
-	//		Index:     0,
-	//	})
-	//}
 
 	raftLog := &RaftLog{
 		storage: storage,
 		// not sure here
 		//committed: lastIndex,
-		stabled: lastIndex,
+		//stabled:
 		entries: entries,
 	}
 	return raftLog
@@ -105,8 +93,11 @@ func (l *RaftLog) maybeCompact() {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
+	if len(l.entries) == 0 {
+		return l.entries
+	}
 	offset := l.entries[0].Index
-	log.Debugf("stabled idx:%v, offset:%v", l.stabled, offset)
+	//log.Debugf("stabled idx:%v, offset:%v", l.stabled, offset)
 	return l.entries[l.stabled+1-offset:]
 }
 
@@ -124,7 +115,8 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
 	if len(l.entries) == 0 {
-		return 0
+		// TODO not sure
+		return l.stabled
 	}
 	return l.entries[len(l.entries)-1].Index
 }
@@ -133,15 +125,19 @@ func (l *RaftLog) LastIndex() uint64 {
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
 	if len(l.entries) == 0 {
-		if i == 0 {
-			return 0, nil
+		if i == l.stabled {
+			//log.Debugf("idx %v term %v", i, l.lastTerm)
+			return l.lastTerm, nil
+		} else if i < l.stabled {
+			return 0, ErrCompacted
 		}
 		return 0, ErrUnavailable
 	}
 	offset := l.entries[0].Index
 	if i < offset {
 		// TODO: maybe we cannot give the offset one?
-		return 0, ErrCompacted
+		return l.lastTerm, ErrCompacted
+		//return 0, ErrCompacted
 	}
 	if int(i-offset) >= len(l.entries) {
 		return 0, ErrUnavailable

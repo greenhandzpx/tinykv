@@ -16,7 +16,6 @@ package raft
 
 import (
 	"errors"
-
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -151,7 +150,7 @@ func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
 	ready := Ready{}
 
-	if rn.Raft.commitAdvance {
+	if rn.HasReady() {
 		ready.SoftState = &SoftState{}
 		ready.Lead = rn.Raft.Lead
 		ready.RaftState = rn.Raft.State
@@ -159,13 +158,27 @@ func (rn *RawNode) Ready() Ready {
 		ready.Term = rn.Raft.Term
 		ready.Vote = rn.Raft.Vote
 		ready.Commit = rn.Raft.RaftLog.committed
+
 	}
+	//if rn.Raft.commitAdvance {
+	//	ready.SoftState = &SoftState{}
+	//	ready.Lead = rn.Raft.Lead
+	//	ready.RaftState = rn.Raft.State
+	//
+	//	ready.Term = rn.Raft.Term
+	//	ready.Vote = rn.Raft.Vote
+	//	ready.Commit = rn.Raft.RaftLog.committed
+	//}
 
 	ready.Entries = rn.Raft.RaftLog.unstableEntries()
 	ready.CommittedEntries = rn.Raft.RaftLog.nextEnts()
+	// TODO not sure
+	ready.Messages = rn.Raft.msgs
 
 	rn.lastCommit = ready.Commit
 	rn.Raft.commitAdvance = false
+
+	rn.Raft.msgs = rn.Raft.msgs[:0]
 
 	return ready
 }
@@ -173,15 +186,23 @@ func (rn *RawNode) Ready() Ready {
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
-	return rn.Raft.commitAdvance
+	if len(rn.Raft.msgs) > 0 || len(rn.Raft.RaftLog.nextEnts()) > 0 ||
+		len(rn.Raft.RaftLog.unstableEntries()) > 0 {
+		return true
+	}
+	return false
+	//return rn.Raft.commitAdvance
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
-	rn.Raft.RaftLog.applied = rn.lastCommit
-	rn.Raft.RaftLog.stabled = rn.lastCommit
+	rn.Raft.RaftLog.applied = rd.Commit
+	rn.Raft.RaftLog.stabled = rd.Commit
+	//log.Debugf("%v advance applied idx & stabled idx %v", rn.Raft.id, rd.Commit)
+	// TODO not sure
+	//rn.Raft.msgs = rn.Raft.msgs[:0]
 }
 
 // GetProgress return the Progress of this node and its peers, if this

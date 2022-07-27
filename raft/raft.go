@@ -22,6 +22,14 @@ import (
 	"sync"
 )
 
+const Debug = false
+
+func DPrintf(format string, a ...interface{}) {
+	if Debug {
+		log.Debugf(format, a...)
+	}
+}
+
 // None is a placeholder node ID used when there is no leader.
 const None uint64 = 0
 
@@ -197,19 +205,27 @@ func newRaft(c *Config) *Raft {
 		heartbeatElapsed: 0,
 		electionElapsed:  0,
 	}
-	for _, peer := range raft.peers {
-		raft.Prs[peer] = &Progress{}
-	}
 
-	hardState, _, _ := c.Storage.InitialState()
+	hardState, confState, _ := c.Storage.InitialState()
 	raft.Term = hardState.Term
 	raft.Vote = hardState.Vote
+
+	raft.peers = append(raft.peers, confState.Nodes...)
 
 	// init the log
 	raftLog := newLog(c.Storage)
 	raftLog.applied = c.Applied
 	raftLog.committed = hardState.Commit
+	raftLog.stabled = hardState.Commit
+	raftLog.lastTerm = hardState.Term
+
 	raft.RaftLog = raftLog
+
+	for _, peer := range raft.peers {
+		raft.Prs[peer] = &Progress{}
+	}
+
+	DPrintf("create a raft, id %v peers size %v", raft.id, len(raft.peers))
 	return raft
 }
 
@@ -218,7 +234,7 @@ func newRaft(c *Config) *Raft {
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
 	//if r.RaftLog.LastIndex() < r.Prs[to].Next {
-	//	log.Debugf("%v's log too short(lastIdx:%v), follower %v's nextIdx:%v",
+	//	DPrintf("%v's log too short(lastIdx:%v), follower %v's nextIdx:%v",
 	//		r.id, r.RaftLog.LastIndex(), to, r.Prs[to].Next)
 	//	return false
 	//}
@@ -231,6 +247,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 		Commit:  r.RaftLog.committed,
 	}
 	if r.RaftLog.LastIndex() < r.Prs[to].Next {
+		DPrintf("leader %v no new entries to %v", r.id, to)
 		// we may just send the commit index msg
 		// give the latest entry to the follower to inform it to update commit index
 		msg.Entries = append(msg.Entries, &r.RaftLog.entries[len(r.RaftLog.entries)-1])
@@ -244,6 +261,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 		}
 		msg.LogTerm = logTerm
 		msg.Index = r.Prs[to].Next - 1
+		//DPrintf("msg logTerm %v index %v", msg.LogTerm, msg.Index)
 
 		offset := r.RaftLog.entries[0].Index
 		for i := r.Prs[to].Next - offset; i < uint64(len(r.RaftLog.entries)); i++ {
@@ -252,7 +270,9 @@ func (r *Raft) sendAppend(to uint64) bool {
 	}
 
 	if len(msg.Entries) > 0 {
-		log.Debugf("%v send append entries(idx:%v) to %v",
+		//DPrintf("%v send append entries(idx:%v):%v to %v",
+		//	r.id, msg.Entries[0].Index, msg.Entries[0].Data, to)
+		DPrintf("%v send append entries(idx:%v) to %v",
 			r.id, msg.Entries[0].Index, to)
 	}
 	r.msgs = append(r.msgs, msg)
@@ -281,7 +301,7 @@ func (r *Raft) tick() {
 	r.electionElapsed++
 	r.heartbeatElapsed++
 	if r.electionElapsed == r.electionTimeout {
-		log.Debugf("%v election timeout", r.id)
+		DPrintf("%v election timeout", r.id)
 		msg := pb.Message{
 			MsgType: pb.MessageType_MsgHup,
 			To:      r.id,
@@ -320,7 +340,7 @@ func (r *Raft) tick() {
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
-	log.Debugf("%v becomes follower, term %v", r.id, r.Term)
+	DPrintf("%v becomes follower, term %v", r.id, r.Term)
 	r.Lead = lead
 	r.Term = term
 	r.State = StateFollower
@@ -347,7 +367,7 @@ func (r *Raft) becomeCandidate() {
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
-	log.Debugf("%v becomes leader, term:%v", r.id, r.Term)
+	DPrintf("%v becomes leader, term:%v", r.id, r.Term)
 	r.State = StateLeader
 	r.Lead = r.id
 	//msg := pb.Message{
@@ -397,7 +417,7 @@ func (r *Raft) resetElectionTimer() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-	//log.Debugf("%v(%v) get a msg, type:%v", r.id, r.State, m.MsgType)
+	//DPrintf("%v(%v) get a msg, type:%v", r.id, r.State, m.MsgType)
 	switch r.State {
 
 	case StateFollower:
@@ -467,8 +487,8 @@ func (r *Raft) election() {
 	// not sure whether we should lock the whole function or not
 	//r.mu.Lock()
 	//defer r.mu.Unlock()
-	log.Debugf("%v starts election, term %v", r.id, r.Term)
-	//log.Debugf("%v starts election", r.id)
+	DPrintf("%v starts election, term %v", r.id, r.Term)
+	//DPrintf("%v starts election", r.id)
 	if r.State != StateCandidate {
 		r.State = StateCandidate
 	}
@@ -479,7 +499,7 @@ func (r *Raft) election() {
 	r.resetElectionTimer()
 	r.voteRespCnt = 1
 
-	//log.Debugf("%v reset timer because of election, term:%v", r.id, r.Term)
+	//DPrintf("%v reset timer because of election, term:%v", r.id, r.Term)
 	for _, peer := range r.peers {
 		r.votes[peer] = false
 	}
@@ -490,7 +510,6 @@ func (r *Raft) election() {
 		r.becomeLeader()
 		return
 	}
-
 	for _, peer := range r.peers {
 		if peer == r.id {
 			continue
@@ -505,8 +524,8 @@ func (r *Raft) election() {
 		logTerm, _ := r.RaftLog.Term(lastIndex)
 		msg.LogTerm = logTerm
 		msg.Index = lastIndex
-		//log.Debugf("send vote")
-		log.Debugf("%v(term:%v) send a request vote to %v", r.id, r.Term, peer)
+		//DPrintf("send vote")
+		DPrintf("%v(term:%v) send a request vote to %v", r.id, r.Term, peer)
 		r.msgs = append(r.msgs, msg)
 	}
 }
@@ -515,7 +534,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 	//r.mu.Lock()
 	//defer r.mu.Unlock()
 
-	log.Debugf("%v(t:%v) request a vote from %v(t:%v)", m.From, m.Term, r.id, r.Term)
+	DPrintf("%v(t:%v) request a vote from %v(t:%v)", m.From, m.Term, r.id, r.Term)
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgRequestVoteResponse,
 		To:      m.From,
@@ -526,7 +545,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 	if r.Term > m.Term {
 		msg.Term = r.Term
 		r.msgs = append(r.msgs, msg)
-		log.Debugf("%v(term:%v) can't vote for %v(term:%v)",
+		DPrintf("%v(term:%v) can't vote for %v(term:%v)",
 			r.id, r.Term, m.From, m.Term)
 		return
 	}
@@ -554,11 +573,11 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		upToDate = true
 	}
 	if !upToDate {
-		log.Debugf("%v(t:%v,i:%v) can't vote for %v(t:%v,i:%v) for not up-to-date",
+		DPrintf("%v(t:%v,i:%v) can't vote for %v(t:%v,i:%v) for not up-to-date",
 			r.id, logTerm, lastIndex, m.From, m.LogTerm, m.Index)
 	}
 	if r.Vote != 0 && r.Vote != m.From {
-		log.Debugf("%v can't vote for %v, it has voted for %v",
+		DPrintf("%v can't vote for %v, it has voted for %v",
 			r.id, m.From, r.Vote)
 	}
 	if (r.Vote == 0 || r.Vote == m.From) && upToDate {
@@ -567,7 +586,8 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		// when granting vote, reset timer
 		r.resetElectionTimer()
 		r.Lead = 0
-		log.Debugf("%v reset timer because of granting", r.id)
+		DPrintf("%v reset timer because of granting, from %v, to %v",
+			r.id, msg.From, msg.To)
 	}
 	r.msgs = append(r.msgs, msg)
 }
@@ -578,26 +598,27 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 
 	if m.Term > r.Term {
 		// change to follower
-		log.Debugf("%v change from candidate to follower", r.id)
+		DPrintf("%v change from candidate to follower", r.id)
 		r.State = StateFollower
 		r.Term = m.Term
 		return
 	}
 
 	if r.State != StateCandidate {
-		log.Debugf("%v isn't candidata anymore, term %v", r.id, r.Term)
+		DPrintf("%v isn't candidate anymore, term %v", r.id, r.Term)
 		return
 	}
 
 	if m.Term < r.Term {
 		// outdated vote
+		DPrintf("stale vote from %v", m.From)
 		return
 	}
 
 	r.voteRespCnt++
 
 	if m.Reject == true {
-		log.Debugf("%v(term:%v) cannot get a vote from %v", r.id, r.Term, m.From)
+		DPrintf("%v(term:%v) cannot get a vote from %v", r.id, r.Term, m.From)
 		r.votes[m.From] = false
 		if r.voteRespCnt == len(r.peers) {
 			// all servers have replied but still not become leader
@@ -605,7 +626,7 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 		}
 		return
 	}
-	log.Debugf("%v(term:%v) gets a vote from %v", r.id, r.Term, m.From)
+	DPrintf("%v(term:%v) gets a vote from %v", r.id, r.Term, m.From)
 	r.votes[m.From] = true
 	cnt := 0
 	for _, granted := range r.votes {
@@ -639,7 +660,7 @@ func (r *Raft) heartbeat(m pb.Message) {
 		if peer == r.id {
 			continue
 		}
-		log.Debugf("%v send heartbeat to %v", r.id, peer)
+		DPrintf("%v send heartbeat to %v", r.id, peer)
 		r.sendHeartbeat(peer)
 	}
 }
@@ -665,7 +686,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	}
 
 	r.resetElectionTimer()
-	log.Debugf("%v reset timer because of heartbeat", r.id)
+	DPrintf("%v reset timer because of heartbeat", r.id)
 
 	r.becomeFollower(m.Term, m.From)
 
@@ -691,7 +712,7 @@ func (r *Raft) proposeAppendEntries(m pb.Message) {
 	//r.mu.Lock()
 	//defer r.mu.Unlock()
 
-	log.Debugf("%v get entries from client", r.id)
+	DPrintf("%v get entries from client", r.id)
 
 	// add the entries into the leader's own log
 	for _, entry := range m.Entries {
@@ -732,7 +753,9 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	//r.mu.Lock()
 	//defer r.mu.Unlock()
 
-	log.Debugf("%v get an append entry from %v", r.id, m.From)
+	DPrintf("%v get an append entry from %v last idx %v",
+		r.id, m.From, m.Index)
+
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppendResponse,
 		To:      m.From,
@@ -748,7 +771,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	}
 
 	r.resetElectionTimer()
-	//log.Debugf("%v reset timer because of appendEntries", r.id)
+	//DPrintf("%v reset timer because of appendEntries", r.id)
 	if m.Term > r.Term {
 		r.Term = m.Term
 	}
@@ -769,7 +792,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	//	msg.LogTerm = m.Entries[len(m.Entries)-1].Term
 	//	msg.Index = m.Entries[len(m.Entries)-1].Index
 	//	r.msgs = append(r.msgs, msg)
-	//	log.Debugf("follower %v receive a noop entry", r.id)
+	//	DPrintf("follower %v receive a noop entry", r.id)
 	//	return
 	//}
 
@@ -789,6 +812,8 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			// the same index entry's term doesn't match
 			// get the first index whose term is prevTerm
 			// to speed up replicating
+			DPrintf("%v not match: prevTerm %v logTerm %v",
+				r.id, prevTerm, m.LogTerm)
 			if len(r.RaftLog.entries) == 0 {
 				msg.Index = r.RaftLog.LastIndex()
 			} else {
@@ -824,7 +849,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		return
 	}
 
-	log.Debugf("%v(log len:%v) gets valid entries(prevIdx:%v, len:%v) from leader %v",
+	DPrintf("%v(log len:%v) gets valid entries(prevIdx:%v, len:%v) from leader %v",
 		r.id, len(r.RaftLog.entries), m.Index, len(m.Entries), m.From)
 	var offset uint64
 	if len(r.RaftLog.entries) == 0 {
@@ -839,14 +864,14 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	//} else {
 	for _, entry := range m.Entries {
 		if entry.Index-offset >= uint64(len(r.RaftLog.entries)) {
-			log.Debugf("follower %v append an entry(idx:%v)", r.id, entry.Index)
+			DPrintf("follower %v append an entry(idx:%v)", r.id, entry.Index)
 			r.RaftLog.entries = append(r.RaftLog.entries, *entry)
 			continue
 		}
 		if r.RaftLog.entries[entry.Index-offset].Term != entry.Term {
 			// confict entry, then truncate all entries after that
 			// and replace them with the leader's entries
-			log.Debugf("%v conflict entry: idx:%v, fterm:%v lterm:%v",
+			DPrintf("%v conflict entry: idx:%v, fterm:%v lterm:%v",
 				r.id, entry.Index, r.RaftLog.entries[entry.Index-offset].Term, entry.Term)
 			r.RaftLog.entries[entry.Index-offset] = *entry
 			if r.RaftLog.stabled >= entry.Index {
@@ -879,7 +904,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		}
 		r.RaftLog.committed = commit
 		r.commitAdvance = true
-		log.Debugf("follower %v update commit idx:%v", r.id, r.RaftLog.committed)
+		DPrintf("follower %v update commit idx:%v", r.id, r.RaftLog.committed)
 	}
 
 	// TODO stable
@@ -911,12 +936,12 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		} else {
 			r.Prs[m.From].Next = m.Index
 		}
-		log.Debugf("%v is rejected, modify follower %v, nextIdx:%v", r.id, m.From, r.Prs[m.From].Next)
+		DPrintf("%v is rejected, modify follower %v, nextIdx:%v", r.id, m.From, r.Prs[m.From].Next)
 		r.sendAppend(m.From)
 		return
 	}
 
-	log.Debugf("%v modify follower %v, nextIdx:%v", r.id, m.From, m.Index+1)
+	DPrintf("%v modify follower %v, nextIdx:%v", r.id, m.From, m.Index+1)
 	r.Prs[m.From].Match = m.Index
 	r.Prs[m.From].Next = m.Index + 1
 
@@ -943,10 +968,10 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 			find = true
 			r.RaftLog.committed = entry.Index
 			r.commitAdvance = true
-			log.Debugf("leader %v advance commit idx: %v", r.id, r.RaftLog.committed)
+			DPrintf("leader %v advance commit idx: %v", r.id, r.RaftLog.committed)
 			break
 		}
-		log.Debugf("%v idx:%v cnt %v", r.id, entry.Index, cnt)
+		DPrintf("%v idx:%v cnt %v", r.id, entry.Index, cnt)
 	}
 	if find {
 		// broadcast the followers to advance commit index
