@@ -2,6 +2,7 @@ package raft_storage
 
 import (
 	"context"
+	"github.com/pingcap-incubator/tinykv/log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,6 +55,7 @@ func (rs *RaftStorage) checkResponse(resp *raft_cmdpb.RaftCmdResponse, reqCount 
 		return errors.Errorf("responses count %d is not equal to requests count %d",
 			len(resp.Responses), reqCount)
 	}
+	log.Debugf("rs get a response from peer")
 	return nil
 }
 

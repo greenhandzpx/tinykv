@@ -58,10 +58,13 @@ func (d *peerMsgHandler) processNormalRequest(entry *eraftpb.Entry) {
 		if prop.term == entry.Term && prop.index == entry.Index {
 			respCb = prop.cb
 			// discard cbs before this cb
-			d.proposals = d.proposals[:i]
+			d.proposals = d.proposals[:i+1]
 			break
 		}
 	}
+	//if d.IsLeader() && respCb == nil {
+	//	panic("shouldn't be nil")
+	//}
 	commandResp := &raft_cmdpb.RaftCmdResponse{
 		Header: &raft_cmdpb.RaftResponseHeader{
 			// TODO handle err(important)
@@ -94,7 +97,12 @@ func (d *peerMsgHandler) processNormalRequest(entry *eraftpb.Entry) {
 			commandResp.Responses[i].Snap = &raft_cmdpb.SnapResponse{
 				Region: d.Region(),
 			}
-			respCb.Txn = d.ctx.engine.Kv.NewTransaction(false)
+			if !d.IsLeader() {
+				break
+			}
+			if respCb != nil {
+				respCb.Txn = d.ctx.engine.Kv.NewTransaction(false)
+			}
 		}
 	}
 
@@ -103,10 +111,17 @@ func (d *peerMsgHandler) processNormalRequest(entry *eraftpb.Entry) {
 	} else {
 	}
 
-	DPrintf("%v response a command, term %v index %v, first type %v",
-		d.PeerId(), entry.Term, entry.Index, request.Requests[0].CmdType)
-
-	respCb.Done(commandResp)
+	if !d.IsLeader() && respCb != nil {
+		leaderId := d.LeaderId()
+		leader := d.getPeerFromCache(leaderId)
+		respCb.Done(ErrResp(&util.ErrNotLeader{RegionId: d.regionId, Leader: leader}))
+	} else if respCb != nil {
+		if len(request.Requests) > 0 {
+			DPrintf("%v response a command, term %v index %v, first type %v",
+				d.PeerId(), entry.Term, entry.Index, request.Requests[0].CmdType)
+		}
+		respCb.Done(commandResp)
+	}
 }
 
 func (d *peerMsgHandler) HandleRaftReady() {
@@ -128,10 +143,11 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	//log.Debugf("transport %v's msgs, size %v", d.PeerId(), len(ready.Messages))
 	d.Send(d.ctx.trans, ready.Messages)
 
-	entries := ready.Entries
-	//log.Debugf("%v ready entries size %v", d.PeerId(), len(entries))
+	entries := ready.CommittedEntries
+	//log.Debugf("%v ready entries size %v commit idx %v", d.PeerId(), len(entries), ready.Commit)
 	for _, entry := range entries {
 		if entry.EntryType == eraftpb.EntryType_EntryNormal {
+			//DPrintf("%v handle an entry term %v index %v", d.PeerId(), entry.Term, entry.Index)
 			d.processNormalRequest(&entry)
 		} else if entry.EntryType == eraftpb.EntryType_EntryConfChange {
 
@@ -225,12 +241,14 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	// TODO not sure whether i should dereference
 	data, err := (*msg).Marshal()
 	if err != nil {
-		// TODO handle err
+		panic(err)
 	}
 	entry.Data = data
 	raftMsg.Entries = append(raftMsg.Entries, &entry)
 
-	d.Send(d.ctx.trans, []eraftpb.Message{raftMsg})
+	d.RaftGroup.Raft.Step(raftMsg)
+	//d.RaftGroup.Propose(data)
+	//d.Send(d.ctx.trans, []eraftpb.Message{raftMsg})
 	// TODO not sure whether i can get the latest term and index of this new entry
 	prop := proposal{
 		term:  entry.Term,
