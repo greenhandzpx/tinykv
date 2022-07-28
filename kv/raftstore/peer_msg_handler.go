@@ -92,6 +92,17 @@ func (d *peerMsgHandler) processNormalRequest(entry *eraftpb.Entry) {
 		// READ
 		case raft_cmdpb.CmdType_Get:
 			// TODO get request
+			txn := d.ctx.engine.Kv.NewTransaction(false)
+			iter := engine_util.NewCFIterator(req.Get.GetCf(), txn)
+			iter.Seek(req.Get.GetKey())
+			commandResp.Responses[i].Get = &raft_cmdpb.GetResponse{}
+			if iter.Valid() {
+				var err error
+				commandResp.Responses[i].Get.Value, err = iter.Item().Value()
+				if err != nil {
+					panic(err)
+				}
+			}
 			isWrite = false
 		case raft_cmdpb.CmdType_Snap:
 			commandResp.Responses[i].Snap = &raft_cmdpb.SnapResponse{
