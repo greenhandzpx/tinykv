@@ -152,6 +152,9 @@ type Raft struct {
 	// the server has advanced the commit index
 	commitAdvance bool
 
+	// snapshot that need to be saved in storage
+	snapshot *pb.Snapshot
+
 	// heartbeat interval, should send
 	heartbeatTimeout int
 	// baseline of election interval
@@ -216,13 +219,29 @@ func newRaft(c *Config) *Raft {
 	raftLog := newLog(c.Storage)
 	raftLog.applied = c.Applied
 	raftLog.committed = hardState.Commit
-	raftLog.stabled = hardState.Commit
+	raftLog.stabled = max(raftLog.LastIndex(), hardState.Commit)
 	raftLog.lastTerm = hardState.Term
-
 	raft.RaftLog = raftLog
 
 	for _, peer := range raft.peers {
 		raft.Prs[peer] = &Progress{}
+	}
+
+	// restart from snapshot
+	snapshot, err := c.Storage.Snapshot()
+	if err != nil {
+		log.Debugf("no snapshot in %v", raft.id)
+	} else {
+		raft.peers = snapshot.Metadata.ConfState.Nodes
+		for _, peer := range raft.peers {
+			raft.Prs[peer] = &Progress{}
+		}
+		raft.RaftLog.committed = max(raft.RaftLog.committed, snapshot.Metadata.Index)
+		raft.RaftLog.stabled = max(raft.RaftLog.stabled, snapshot.Metadata.Index)
+		raft.RaftLog.applied = max(raft.RaftLog.applied, snapshot.Metadata.Index)
+		raft.RaftLog.lastTerm = max(raft.RaftLog.lastTerm, snapshot.Metadata.Term)
+		// TODO why not give the snapshot to pendingSnapshot?
+		//raft.RaftLog.pendingSnapshot = &snapshot
 	}
 
 	DPrintf("create a raft, id %v peers size %v", raft.id, len(raft.peers))
@@ -256,16 +275,41 @@ func (r *Raft) sendAppend(to uint64) bool {
 
 	} else {
 		logTerm, err := r.RaftLog.Term(r.Prs[to].Next - 1)
-		if err != nil {
-			// TODO
+		if err == ErrCompacted {
+			// the entry before the next entry has been compacted
+			msg.LogTerm = r.RaftLog.lastTerm
+		} else {
+			msg.LogTerm = logTerm
 		}
-		msg.LogTerm = logTerm
 		msg.Index = r.Prs[to].Next - 1
 		//DPrintf("msg logTerm %v index %v", msg.LogTerm, msg.Index)
 
-		offset := r.RaftLog.entries[0].Index
-		for i := r.Prs[to].Next - offset; i < uint64(len(r.RaftLog.entries)); i++ {
-			msg.Entries = append(msg.Entries, &r.RaftLog.entries[i])
+		if _, err := r.RaftLog.Term(r.Prs[to].Next); err == ErrCompacted {
+			// the next entry has been compacted, we
+			// should send the snapshot
+			msg.MsgType = pb.MessageType_MsgSnapshot
+
+			snapshot, err := r.RaftLog.storage.Snapshot()
+			for err != nil {
+				// try until the snapshot is available
+				snapshot, err = r.RaftLog.storage.Snapshot()
+			}
+			msg.Snapshot = &snapshot
+			msg.LogTerm = snapshot.Metadata.Term
+			msg.Index = snapshot.Metadata.Index
+
+			// TODO not sure
+			// because we don't handle snapshot response,
+			// we just advance the Prs[to] at once
+			r.Prs[to].Next = msg.Index + 1
+
+		} else {
+			// put all the needed entries into msg
+			offset := r.RaftLog.entries[0].Index
+			for i := r.Prs[to].Next - offset; i < uint64(len(r.RaftLog.entries)); i++ {
+				msg.Entries = append(msg.Entries, &r.RaftLog.entries[i])
+			}
+
 		}
 	}
 
@@ -433,6 +477,8 @@ func (r *Raft) Step(m pb.Message) error {
 			r.handleHeartbeat(m)
 		case pb.MessageType_MsgAppend:
 			r.handleAppendEntries(m)
+		case pb.MessageType_MsgSnapshot:
+			r.handleSnapshot(m)
 		case pb.MessageType_MsgPropose:
 			// TODO
 		default:
@@ -453,6 +499,8 @@ func (r *Raft) Step(m pb.Message) error {
 			r.handleHeartbeat(m)
 		case pb.MessageType_MsgAppend:
 			r.handleAppendEntries(m)
+		case pb.MessageType_MsgSnapshot:
+			r.handleSnapshot(m)
 		default:
 
 		}
@@ -476,6 +524,8 @@ func (r *Raft) Step(m pb.Message) error {
 			r.handleAppendEntriesResponse(m)
 		case pb.MessageType_MsgPropose:
 			r.proposeAppendEntries(m)
+		case pb.MessageType_MsgSnapshot:
+			r.handleSnapshot(m)
 		default:
 
 		}
@@ -987,6 +1037,48 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	if m.Term < r.Term {
+		return
+	}
+	if m.Term > r.Term {
+		r.Term = m.Term
+	}
+	if r.State != StateFollower {
+		r.Lead = m.From
+		r.State = StateFollower
+	}
+
+	if m.Snapshot.Metadata.Index <= r.RaftLog.committed {
+		// the snapshot is stale
+		DPrintf("stale snapshot(idx:%v) in %v(committed:%v)",
+			m.Snapshot.Metadata.Index, r.id, r.RaftLog.committed)
+		return
+	}
+
+	r.RaftLog.committed = m.Snapshot.Metadata.Index
+	r.RaftLog.stabled = m.Snapshot.Metadata.Index
+	r.RaftLog.applied = m.Snapshot.Metadata.Index
+	r.RaftLog.lastTerm = m.Snapshot.Metadata.Term
+	// remove the stale log entries
+	r.RaftLog.entries = r.RaftLog.entries[:0]
+
+	// update peers
+	r.peers = m.Snapshot.Metadata.ConfState.Nodes
+	Prs := make(map[uint64]*Progress, 0)
+	for _, peer := range r.peers {
+		if prog, ok := r.Prs[peer]; ok {
+			Prs[peer] = prog
+		} else {
+			Prs[peer] = &Progress{}
+		}
+	}
+	r.Prs = Prs
+	r.RaftLog.pendingSnapshot = m.Snapshot
+
+	// update leader
+	if r.Lead != m.From {
+		r.Lead = m.From
+	}
 }
 
 // addNode add a new node to raft group

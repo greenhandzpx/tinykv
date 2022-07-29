@@ -52,7 +52,7 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
-	// when created, the initial term
+	// the last compacted entry's term
 	lastTerm uint64
 }
 

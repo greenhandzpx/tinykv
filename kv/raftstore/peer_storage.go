@@ -335,6 +335,43 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 	// and ps.clearExtraData to delete stale data
 	// Your Code Here (2C).
+
+	// update raft local state
+	if snapshot.Metadata.Index > ps.raftState.LastIndex {
+		ps.raftState.LastTerm = snapshot.Metadata.Term
+		ps.raftState.LastIndex = snapshot.Metadata.Index
+	}
+	// update raft apply state
+	if snapshot.Metadata.Index > ps.applyState.AppliedIndex {
+		ps.applyState.AppliedIndex = snapshot.Metadata.Index
+	}
+	if snapshot.Metadata.Index > ps.applyState.TruncatedState.Index {
+		ps.applyState.TruncatedState.Term = snapshot.Metadata.Term
+		ps.applyState.TruncatedState.Index = snapshot.Metadata.Index
+	}
+	// update snap state
+	ps.snapState.StateType = snap.SnapState_Applying
+	// persist
+	raftStateKey := meta.RaftStateKey(ps.region.Id)
+	raftWB.SetMeta(raftStateKey, ps.raftState)
+	applyStateKey := meta.ApplyStateKey(ps.region.Id)
+	kvWB.SetMeta(applyStateKey, ps.applyState)
+	// send the task to region worker
+	notifier := make(chan bool)
+	ps.regionSched <- runner.RegionTaskApply{
+		RegionId: ps.region.Id,
+		Notifier: notifier,
+		SnapMeta: snapshot.Metadata,
+		StartKey: snapData.Region.StartKey,
+		EndKey:   snapData.Region.EndKey,
+	}
+	// block until finishing task
+	<-notifier
+
+	// TODO not sure
+	ps.clearMeta(kvWB, raftWB)
+	ps.clearExtraData(ps.region)
+
 	return nil, nil
 }
 
@@ -347,6 +384,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	if err := ps.Append(ready.Entries, &raftWB); err != nil {
 		return nil, err
 	}
+
 	// update raft local state
 	ps.raftState.HardState.Term = ready.Term
 	ps.raftState.HardState.Commit = ready.Commit
@@ -355,14 +393,26 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 		ps.raftState.LastIndex = ready.Entries[len(ready.Entries)-1].Index
 		ps.raftState.LastTerm = ready.Entries[len(ready.Entries)-1].Term
 	}
-
 	raftStateKey := meta.RaftStateKey(ps.region.Id)
+
+	if ready.Snapshot.Data != nil {
+		kvWB := engine_util.WriteBatch{}
+		if _, err := ps.ApplySnapshot(&ready.Snapshot, &kvWB, &raftWB); err != nil {
+			panic(err)
+		}
+		if err := ps.Engines.WriteKV(&kvWB); err != nil {
+			panic(err)
+		}
+	}
+	// TODO not sure
+	//// first delete the original value
+	//raftWB.DeleteMeta(raftStateKey)
+	// then write the new value
 	if err := raftWB.SetMeta(raftStateKey, ps.raftState); err != nil {
 		return nil, err
 	}
 
-	// TODO update applied index
-	if err := raftWB.WriteToDB(ps.Engines.Raft); err != nil {
+	if err := ps.Engines.WriteRaft(&raftWB); err != nil {
 		return nil, err
 	}
 	return nil, nil

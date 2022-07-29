@@ -48,11 +48,7 @@ func newPeerMsgHandler(peer *peer, ctx *GlobalContext) *peerMsgHandler {
 	}
 }
 
-func (d *peerMsgHandler) processNormalRequest(entry *eraftpb.Entry) {
-	var request raft_cmdpb.RaftCmdRequest
-	if err := request.Unmarshal(entry.Data); err != nil {
-		panic(err)
-	}
+func (d *peerMsgHandler) processBasicCommandRequest(entry *eraftpb.Entry, request *raft_cmdpb.RaftCmdRequest) {
 	var respCb *message.Callback
 	for i, prop := range d.proposals {
 		if prop.term == entry.Term && prop.index == entry.Index {
@@ -133,6 +129,37 @@ func (d *peerMsgHandler) processNormalRequest(entry *eraftpb.Entry) {
 		}
 		respCb.Done(commandResp)
 	}
+
+}
+
+func (d *peerMsgHandler) processCompactLogRequest(request *raft_cmdpb.RaftCmdRequest) {
+	// update raft apply state
+	d.peerStorage.applyState.TruncatedState.Index =
+		request.AdminRequest.CompactLog.CompactIndex
+	d.peerStorage.applyState.TruncatedState.Term =
+		request.AdminRequest.CompactLog.CompactTerm
+
+	// schedule the truncating task asynchronously
+	d.ScheduleCompactLog(request.AdminRequest.CompactLog.CompactIndex)
+}
+
+func (d *peerMsgHandler) processNormalRequest(entry *eraftpb.Entry) {
+	var request raft_cmdpb.RaftCmdRequest
+	if err := request.Unmarshal(entry.Data); err != nil {
+		panic(err)
+	}
+
+	if request.AdminRequest != nil {
+		if request.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_CompactLog {
+			// compact log request
+			d.processCompactLogRequest(&request)
+		} else {
+			// TODO
+		}
+	} else {
+		// GET/PUT/SNAP/DELETE
+		d.processBasicCommandRequest(entry, &request)
+	}
 }
 
 func (d *peerMsgHandler) HandleRaftReady() {
@@ -163,6 +190,8 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		} else if entry.EntryType == eraftpb.EntryType_EntryConfChange {
 
 		}
+		// update & persist the applied index
+		d.peerStorage.applyState.AppliedIndex = entry.Index
 	}
 	d.RaftGroup.Advance(ready)
 }
@@ -260,7 +289,6 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	d.RaftGroup.Raft.Step(raftMsg)
 	//d.RaftGroup.Propose(data)
 	//d.Send(d.ctx.trans, []eraftpb.Message{raftMsg})
-	// TODO not sure whether i can get the latest term and index of this new entry
 	prop := proposal{
 		term:  entry.Term,
 		index: entry.Index,

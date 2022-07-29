@@ -158,7 +158,6 @@ func (rn *RawNode) Ready() Ready {
 		ready.Term = rn.Raft.Term
 		ready.Vote = rn.Raft.Vote
 		ready.Commit = rn.Raft.RaftLog.committed
-
 	}
 	//if rn.Raft.commitAdvance {
 	//	ready.SoftState = &SoftState{}
@@ -169,6 +168,12 @@ func (rn *RawNode) Ready() Ready {
 	//	ready.Vote = rn.Raft.Vote
 	//	ready.Commit = rn.Raft.RaftLog.committed
 	//}
+	if rn.Raft.RaftLog.pendingSnapshot != nil {
+		ready.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
+		rn.Raft.RaftLog.pendingSnapshot = nil
+	} else {
+		ready.Snapshot.Data = nil
+	}
 
 	ready.Entries = rn.Raft.RaftLog.unstableEntries()
 	ready.CommittedEntries = rn.Raft.RaftLog.nextEnts()
