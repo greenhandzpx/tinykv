@@ -15,6 +15,7 @@
 package raft
 
 import (
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -136,10 +137,13 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 	offset := l.entries[0].Index
 	if i < offset {
 		// TODO: maybe we cannot give the offset one?
+		log.Debugf("ErrCompacted idx %v offset %v", i, offset)
 		return l.lastTerm, ErrCompacted
 		//return 0, ErrCompacted
 	}
 	if int(i-offset) >= len(l.entries) {
+		log.Debugf("ErrUnavailable idx %v offset %v len(entries) %v",
+			i, offset, len(l.entries))
 		return 0, ErrUnavailable
 	}
 	return l.entries[i-offset].Term, nil

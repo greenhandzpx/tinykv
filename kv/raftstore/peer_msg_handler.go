@@ -152,6 +152,9 @@ func (d *peerMsgHandler) processNormalRequest(entry *eraftpb.Entry) {
 	if request.AdminRequest != nil {
 		if request.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_CompactLog {
 			// compact log request
+			log.Debugf("%v get a compact command term %v idx %v",
+				d.PeerId(), request.AdminRequest.CompactLog.CompactTerm,
+				request.AdminRequest.CompactLog.CompactIndex)
 			d.processCompactLogRequest(&request)
 		} else {
 			// TODO
@@ -294,8 +297,10 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		index: entry.Index,
 		cb:    cb,
 	}
-	log.Debugf("leader %v get a %v command, prop term %v idx %v",
-		d.PeerId(), msg.Requests[0].CmdType, prop.term, prop.index)
+	if len(msg.Requests) > 0 {
+		log.Debugf("leader %v get a %v command, prop term %v idx %v",
+			d.PeerId(), msg.Requests[0].CmdType, prop.term, prop.index)
+	}
 	d.proposals = append(d.proposals, &prop)
 }
 
