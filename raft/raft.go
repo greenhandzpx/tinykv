@@ -19,10 +19,9 @@ import (
 	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"math/rand"
-	"sync"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) {
 	if Debug {
@@ -126,8 +125,6 @@ type Raft struct {
 	// all peers' id
 	peers []uint64
 
-	mu sync.Mutex
-
 	// the log
 	RaftLog *RaftLog
 
@@ -154,6 +151,9 @@ type Raft struct {
 
 	// snapshot that need to be saved in storage
 	snapshot *pb.Snapshot
+
+	// pendingTransferring transferring that is pending and leader cannot be proposed
+	pendingTransferring *pb.Message
 
 	// heartbeat interval, should send
 	heartbeatTimeout int
@@ -223,25 +223,25 @@ func newRaft(c *Config) *Raft {
 	raftLog.lastTerm = hardState.Term
 	raft.RaftLog = raftLog
 
-	for _, peer := range raft.peers {
-		raft.Prs[peer] = &Progress{}
-	}
-
 	// restart from snapshot
 	snapshot, err := c.Storage.Snapshot()
-	if err != nil {
+	if err != nil || snapshot.Metadata == nil {
 		log.Debugf("no snapshot in %v", raft.id)
 	} else {
-		raft.peers = snapshot.Metadata.ConfState.Nodes
-		for _, peer := range raft.peers {
-			raft.Prs[peer] = &Progress{}
+		if len(snapshot.Metadata.ConfState.Nodes) > 0 {
+			raft.peers = snapshot.Metadata.ConfState.Nodes
 		}
+
 		raft.RaftLog.committed = max(raft.RaftLog.committed, snapshot.Metadata.Index)
 		raft.RaftLog.stabled = max(raft.RaftLog.stabled, snapshot.Metadata.Index)
 		raft.RaftLog.applied = max(raft.RaftLog.applied, snapshot.Metadata.Index)
 		raft.RaftLog.lastTerm = max(raft.RaftLog.lastTerm, snapshot.Metadata.Term)
 		// TODO why not give the snapshot to pendingSnapshot?
 		//raft.RaftLog.pendingSnapshot = &snapshot
+	}
+
+	for _, peer := range raft.peers {
+		raft.Prs[peer] = &Progress{}
 	}
 
 	DPrintf("create a raft, id %v peers size %v", raft.id, len(raft.peers))
@@ -479,6 +479,10 @@ func (r *Raft) Step(m pb.Message) error {
 			r.handleAppendEntries(m)
 		case pb.MessageType_MsgSnapshot:
 			r.handleSnapshot(m)
+		case pb.MessageType_MsgTimeoutNow:
+			r.handleTimeoutNow(m)
+		case pb.MessageType_MsgTransferLeader:
+			r.handleTransferLeader(m)
 		case pb.MessageType_MsgPropose:
 			// TODO
 		default:
@@ -501,6 +505,10 @@ func (r *Raft) Step(m pb.Message) error {
 			r.handleAppendEntries(m)
 		case pb.MessageType_MsgSnapshot:
 			r.handleSnapshot(m)
+		case pb.MessageType_MsgTimeoutNow:
+			r.handleTimeoutNow(m)
+		case pb.MessageType_MsgTransferLeader:
+			r.handleTransferLeader(m)
 		default:
 
 		}
@@ -526,6 +534,11 @@ func (r *Raft) Step(m pb.Message) error {
 			r.proposeAppendEntries(m)
 		case pb.MessageType_MsgSnapshot:
 			r.handleSnapshot(m)
+		case pb.MessageType_MsgTransferLeader:
+			r.handleTransferLeader(m)
+		case pb.MessageType_MsgTimeoutNow:
+			r.handleTimeoutNow(m)
+
 		default:
 
 		}
@@ -762,6 +775,13 @@ func (r *Raft) proposeAppendEntries(m pb.Message) {
 	//r.mu.Lock()
 	//defer r.mu.Unlock()
 
+	// when there is a pending transferring request,
+	// the leader cannot be proposed any new requests
+	if r.pendingTransferring != nil {
+		DPrintf("%v has pending transferring request, to %v", r.id, r.pendingTransferring.From)
+		return
+	}
+
 	DPrintf("%v get entries from client", r.id)
 
 	// add the entries into the leader's own log
@@ -968,8 +988,6 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 }
 
 func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
-	//r.mu.Lock()
-	//defer r.mu.Unlock()
 
 	if m.Term > r.Term {
 		r.becomeFollower(m.Term, 0)
@@ -1027,11 +1045,22 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		// broadcast the followers to advance commit index
 		// TODO
 		// not sure
-		//r.mu.Unlock()
 		r.broadcastAppendEntries()
-		//r.mu.Lock()
 	}
 
+	if r.pendingTransferring != nil {
+		// check whether the transferree is up-to-date
+		if r.Prs[r.pendingTransferring.From].Match == r.RaftLog.LastIndex() {
+			msg := pb.Message{
+				MsgType: pb.MessageType_MsgTimeoutNow,
+				To:      r.pendingTransferring.From,
+				From:    r.id,
+				Term:    r.Term,
+			}
+			r.msgs = append(r.msgs, msg)
+			r.pendingTransferring = nil
+		}
+	}
 }
 
 // handleSnapshot handle Snapshot RPC request
@@ -1079,6 +1108,66 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	if r.Lead != m.From {
 		r.Lead = m.From
 	}
+}
+
+func (r *Raft) handleTransferLeader(m pb.Message) {
+	if _, ok := r.Prs[m.From]; !ok {
+		return
+	}
+
+	if m.From == r.id && r.State == StateLeader {
+		if r.pendingTransferring != nil {
+			r.pendingTransferring = nil
+
+		}
+		return
+	}
+
+	if r.State != StateLeader {
+		// the transferring request is sent to a non-leader
+		// then we just let the transferree start an election ?
+		// TODO not sure
+		msg := pb.Message{
+			MsgType: pb.MessageType_MsgTimeoutNow,
+			To:      m.From,
+			From:    r.id,
+			Term:    r.Term,
+		}
+		r.msgs = append(r.msgs, msg)
+		return
+	}
+
+	if r.Prs[m.From].Match == r.RaftLog.LastIndex() {
+		// the transferee is up-to-date
+		msg := pb.Message{
+			MsgType: pb.MessageType_MsgTimeoutNow,
+			To:      m.From,
+			From:    r.id,
+			Term:    r.Term,
+		}
+		r.msgs = append(r.msgs, msg)
+
+	} else {
+		r.sendAppend(m.From)
+		r.pendingTransferring = &m
+	}
+}
+
+func (r *Raft) handleTimeoutNow(m pb.Message) {
+	if r.Term > m.Term {
+		// maybe a stale request ?
+		return
+	}
+	if r.Term < m.Term {
+		r.Term = m.Term
+		r.State = StateFollower
+		return
+	}
+	if r.State == StateLeader {
+		return
+	}
+
+	r.election()
 }
 
 // addNode add a new node to raft group
