@@ -1014,6 +1014,11 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 	r.Prs[m.From].Next = m.Index + 1
 
 	// check whether there exists any entry that can be committed
+	r.checkCommitted()
+}
+
+func (r *Raft) checkCommitted() {
+	// check whether there exists any entry that can be committed
 	find := false
 	for i := len(r.RaftLog.entries) - 1; i >= 0; i-- {
 		entry := r.RaftLog.entries[i]
@@ -1061,6 +1066,7 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 			r.pendingTransferring = nil
 		}
 	}
+
 }
 
 // handleSnapshot handle Snapshot RPC request
@@ -1167,15 +1173,39 @@ func (r *Raft) handleTimeoutNow(m pb.Message) {
 		return
 	}
 
+	// TODO not sure whether we should judge before every request
+	if _, ok := r.Prs[m.From]; !ok {
+		// this request isn't from the same raft group
+		return
+	}
+	if _, ok := r.Prs[r.id]; !ok {
+		// this request isn't from the same raft group
+		return
+	}
+
 	r.election()
 }
 
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	r.peers = append(r.peers, id)
+	// TODO not sure how to init
+	r.Prs[id] = &Progress{
+		Match: 0,
+		Next:  r.RaftLog.LastIndex(),
+	}
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	delete(r.Prs, id)
+	r.peers = r.peers[:0]
+	for peer, _ := range r.Prs {
+		r.peers = append(r.peers, peer)
+	}
+
+	// check whether there exists any entry that can be committed
+	r.checkCommitted()
 }

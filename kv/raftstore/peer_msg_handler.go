@@ -87,7 +87,6 @@ func (d *peerMsgHandler) processBasicCommandRequest(entry *eraftpb.Entry, reques
 			commandResp.Responses[i].Delete = &raft_cmdpb.DeleteResponse{}
 		// READ
 		case raft_cmdpb.CmdType_Get:
-			// TODO get request
 			txn := d.ctx.engine.Kv.NewTransaction(false)
 			iter := engine_util.NewCFIterator(req.Get.GetCf(), txn)
 			iter.Seek(req.Get.GetKey())
@@ -115,7 +114,6 @@ func (d *peerMsgHandler) processBasicCommandRequest(entry *eraftpb.Entry, reques
 
 	if isWrite {
 		d.ctx.engine.WriteKV(&wb)
-	} else {
 	}
 
 	if !d.IsLeader() && respCb != nil {
@@ -165,6 +163,14 @@ func (d *peerMsgHandler) processNormalRequest(entry *eraftpb.Entry) {
 	}
 }
 
+func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry) {
+	var confChange eraftpb.ConfChange
+	if err := confChange.Unmarshal(entry.Data); err != nil {
+		panic(err)
+	}
+	d.RaftGroup.ApplyConfChange(confChange)
+}
+
 func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped {
 		return
@@ -191,7 +197,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 			//DPrintf("%v handle an entry term %v index %v", d.PeerId(), entry.Term, entry.Index)
 			d.processNormalRequest(&entry)
 		} else if entry.EntryType == eraftpb.EntryType_EntryConfChange {
-
+			d.processConfChangeRequest(&entry)
 		}
 		// update & persist the applied index
 		d.peerStorage.applyState.AppliedIndex = entry.Index
