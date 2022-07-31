@@ -230,7 +230,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			go networkchaos(t, cluster, ch_partitioner, &done_partitioner, unreliable, partitions, electionTimeout)
 		}
 		if confchange {
-			// Allow the clients to perfrom some operations without interruption
+			// Allow the clients to perform some operations without interruption
 			time.Sleep(100 * time.Millisecond)
 			go confchanger(t, cluster, ch_confchange, &done_confchanger)
 		}

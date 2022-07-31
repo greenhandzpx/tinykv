@@ -98,7 +98,7 @@ func (d *peerMsgHandler) processBasicCommandRequest(entry *eraftpb.Entry, reques
 					panic(err)
 				}
 			}
-			isWrite = false
+			txn.Discard()
 		case raft_cmdpb.CmdType_Snap:
 			commandResp.Responses[i].Snap = &raft_cmdpb.SnapResponse{
 				Region: d.Region(),
@@ -168,6 +168,36 @@ func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry) {
 	if err := confChange.Unmarshal(entry.Data); err != nil {
 		panic(err)
 	}
+
+	// change the region local state (region epoch & peers)
+	d.peerStorage.region.RegionEpoch.ConfVer++
+	if confChange.ChangeType == eraftpb.ConfChangeType_AddNode {
+		peer := metapb.Peer{
+			Id:      confChange.NodeId,
+			StoreId: confChange.NodeId,
+		}
+		for _, peer := range d.peerStorage.region.Peers {
+			if peer.Id == confChange.NodeId {
+				return
+			}
+		}
+		d.peerStorage.region.Peers = append(d.peerStorage.region.Peers, &peer)
+
+	} else if confChange.ChangeType == eraftpb.ConfChangeType_RemoveNode {
+		for i, peer := range d.peerStorage.region.Peers {
+			if peer.Id == confChange.NodeId {
+				d.peerStorage.region.Peers = append(d.peerStorage.region.Peers[:i],
+					d.peerStorage.region.Peers[i+1:]...)
+				break
+			}
+		}
+		if confChange.NodeId == d.PeerId() {
+			d.destroyPeer()
+		}
+	}
+	// update global ctx
+	d.ctx.storeMeta.regions[d.regionId] = d.peerStorage.region
+	// apply to the raft layer
 	d.RaftGroup.ApplyConfChange(confChange)
 }
 
@@ -194,9 +224,11 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	//log.Debugf("%v ready entries size %v commit idx %v", d.PeerId(), len(entries), ready.Commit)
 	for _, entry := range entries {
 		if entry.EntryType == eraftpb.EntryType_EntryNormal {
+			//log.Debugf("%v ready: entryNormal, idx %v", d.PeerId(), entry.Index)
 			//DPrintf("%v handle an entry term %v index %v", d.PeerId(), entry.Term, entry.Index)
 			d.processNormalRequest(&entry)
 		} else if entry.EntryType == eraftpb.EntryType_EntryConfChange {
+			log.Debugf("%v ready: entryConfChange, idx %v", d.PeerId(), entry.Index)
 			d.processConfChangeRequest(&entry)
 		}
 		// update & persist the applied index
@@ -277,37 +309,53 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	//DPrintf("%v get a command %v", d.PeerId(), msg.Requests[0].CmdType)
 
 	// Your Code Here (2B).
-	raftMsg := eraftpb.Message{
-		MsgType: eraftpb.MessageType_MsgPropose,
-		To:      d.PeerId(),
-		From:    d.PeerId(),
-		Entries: make([]*eraftpb.Entry, 0),
-	}
+	if msg.AdminRequest != nil &&
+		msg.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_TransferLeader {
+		// leader transfer
+		d.RaftGroup.TransferLeader(msg.AdminRequest.TransferLeader.Peer.Id)
+		log.Debugf("leader %v get a %v command",
+			d.PeerId(), msg.AdminRequest.CmdType)
 
-	entry := eraftpb.Entry{
-		EntryType: eraftpb.EntryType_EntryNormal,
-	}
-	// TODO not sure whether i should dereference
-	data, err := (*msg).Marshal()
-	if err != nil {
-		panic(err)
-	}
-	entry.Data = data
-	raftMsg.Entries = append(raftMsg.Entries, &entry)
+	} else {
+		// requests like get/put/snap/delete & other admin requests
+		raftMsg := eraftpb.Message{
+			MsgType: eraftpb.MessageType_MsgPropose,
+			To:      d.PeerId(),
+			From:    d.PeerId(),
+			Entries: make([]*eraftpb.Entry, 0),
+		}
 
-	d.RaftGroup.Raft.Step(raftMsg)
-	//d.RaftGroup.Propose(data)
-	//d.Send(d.ctx.trans, []eraftpb.Message{raftMsg})
-	prop := proposal{
-		term:  entry.Term,
-		index: entry.Index,
-		cb:    cb,
+		entry := eraftpb.Entry{}
+		entry.EntryType = eraftpb.EntryType_EntryNormal
+		// TODO not sure whether i should dereference
+		data, err := (*msg).Marshal()
+		if err != nil {
+			panic(err)
+		}
+		entry.Data = data
+		raftMsg.Entries = append(raftMsg.Entries, &entry)
+
+		d.RaftGroup.Raft.Step(raftMsg)
+		//d.RaftGroup.Propose(data)
+		//d.Send(d.ctx.trans, []eraftpb.Message{raftMsg})
+		prop := proposal{
+			term:  entry.Term,
+			index: entry.Index,
+			cb:    cb,
+		}
+		// because we pass on the entry through its pointer
+		// we can get the term and index when it is handled by the leader
+		// this is why I don't use rawnode.Propose()
+		if msg.AdminRequest != nil {
+			log.Debugf("leader %v get a %v command, prop term %v idx %v",
+				d.PeerId(), msg.AdminRequest.CmdType, prop.term, prop.index)
+		} else {
+			log.Debugf("leader %v get a %v command, prop term %v idx %v",
+				d.PeerId(), msg.Requests[0].CmdType, prop.term, prop.index)
+		}
+		d.proposals = append(d.proposals, &prop)
+
 	}
-	if len(msg.Requests) > 0 {
-		log.Debugf("leader %v get a %v command, prop term %v idx %v",
-			d.PeerId(), msg.Requests[0].CmdType, prop.term, prop.index)
-	}
-	d.proposals = append(d.proposals, &prop)
 }
 
 func (d *peerMsgHandler) onTick() {
