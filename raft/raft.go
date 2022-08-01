@@ -1189,6 +1189,10 @@ func (r *Raft) handleTimeoutNow(m pb.Message) {
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	if _, ok := r.Prs[id]; ok {
+		// this peer has already exists
+		return
+	}
 	r.peers = append(r.peers, id)
 	// TODO not sure how to init
 	r.Prs[id] = &Progress{
