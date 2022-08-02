@@ -81,6 +81,7 @@ func (wb *WriteBatch) WriteToDB(db *badger.DB) error {
 					err1 = txn.Delete(entry.Key)
 				} else {
 					//fmt.Printf("write to DB: set a key:%v, value:%v\n", entry.Key, entry.Value)
+					//log.Debugf("write a kv, k %v v %v", entry.Key, entry.Value)
 					err1 = txn.SetEntry(entry)
 				}
 				if err1 != nil {

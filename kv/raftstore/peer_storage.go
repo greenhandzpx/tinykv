@@ -160,6 +160,7 @@ func (ps *PeerStorage) Snapshot() (eraftpb.Snapshot, error) {
 				snapshot = *s
 			}
 		default:
+			// non blocking
 			return snapshot, raft.ErrSnapshotTemporarilyUnavailable
 		}
 		ps.snapState.StateType = snap.SnapState_Relax
@@ -349,6 +350,7 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		ps.applyState.TruncatedState.Term = snapshot.Metadata.Term
 		ps.applyState.TruncatedState.Index = snapshot.Metadata.Index
 	}
+	
 	// update snap state
 	ps.snapState.StateType = snap.SnapState_Applying
 	// persist
@@ -381,6 +383,8 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
 	raftWB := engine_util.WriteBatch{}
+
+	// update raft log data
 	if err := ps.Append(ready.Entries, &raftWB); err != nil {
 		return nil, err
 	}
@@ -394,7 +398,15 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 		ps.raftState.LastTerm = ready.Entries[len(ready.Entries)-1].Term
 	}
 	raftStateKey := meta.RaftStateKey(ps.region.Id)
+	// TODO not sure
+	//// first delete the original value
+	//raftWB.DeleteMeta(raftStateKey)
+	// then write the new value
+	if err := raftWB.SetMeta(raftStateKey, ps.raftState); err != nil {
+		return nil, err
+	}
 
+	// apply snapshot data
 	if ready.Snapshot.Data != nil {
 		kvWB := engine_util.WriteBatch{}
 		if _, err := ps.ApplySnapshot(&ready.Snapshot, &kvWB, &raftWB); err != nil {
@@ -404,16 +416,15 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 			panic(err)
 		}
 	}
-	// TODO not sure
-	//// first delete the original value
-	//raftWB.DeleteMeta(raftStateKey)
-	// then write the new value
-	if err := raftWB.SetMeta(raftStateKey, ps.raftState); err != nil {
-		return nil, err
-	}
+
+	//// update region local state
+	//regionLocalKey := meta.RegionStateKey(ps.region.Id)
+	//if err := kvWB.SetMeta(regionLocalKey, ps.region); err != nil {
+	//	return nil, err
+	//}
 
 	if err := ps.Engines.WriteRaft(&raftWB); err != nil {
-		return nil, err
+		panic(err)
 	}
 	return nil, nil
 }

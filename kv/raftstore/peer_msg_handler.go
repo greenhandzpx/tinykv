@@ -2,9 +2,11 @@ package raftstore
 
 import (
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/errorpb"
+	"strconv"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -242,7 +244,7 @@ func (d *peerMsgHandler) processSplitRequest(entry *eraftpb.Entry, request *raft
 	}
 }
 
-func (d *peerMsgHandler) processNormalRequest(entry *eraftpb.Entry) {
+func (d *peerMsgHandler) processNormalRequest(entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
 	var request raft_cmdpb.RaftCmdRequest
 	if err := request.Unmarshal(entry.Data); err != nil {
 		panic(err)
@@ -267,7 +269,10 @@ func (d *peerMsgHandler) processNormalRequest(entry *eraftpb.Entry) {
 	}
 }
 
-func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry) {
+func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) bool {
+
+	isNotDeletedItself := true
+
 	respCb := d.fetchCallback(entry.Term, entry.Index)
 
 	var request raft_cmdpb.RaftCmdRequest
@@ -283,6 +288,9 @@ func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry) {
 
 	// change the region local state (region epoch & peers)
 	d.peerStorage.region.RegionEpoch.ConfVer++
+	log.Debugf("%v region epoch ConfVer %v", d.PeerId(),
+		d.peerStorage.region.RegionEpoch.ConfVer)
+
 	if confChange.ChangeType == eraftpb.ConfChangeType_AddNode {
 		// add node
 		exists := false
@@ -296,6 +304,7 @@ func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry) {
 			d.peerStorage.region.Peers = append(d.peerStorage.region.Peers, confChange.Peer)
 			//// register this peer in the router
 			//d.ctx.router.register(confChange.Peer)
+			log.Debugf("%v add a new node %v", d.PeerId(), confChange.Peer.Id)
 		}
 
 	} else if confChange.ChangeType == eraftpb.ConfChangeType_RemoveNode {
@@ -307,13 +316,23 @@ func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry) {
 				break
 			}
 		}
+		log.Debugf("%v delete a node %v", d.PeerId(), confChange.Peer.Id)
 		// TODO not sure here
 		if confChange.Peer.Id == d.PeerId() {
+			isNotDeletedItself = false
 			d.destroyPeer()
 		}
 	}
-	// update global ctx
-	d.ctx.storeMeta.regions[d.regionId] = d.peerStorage.region
+	if isNotDeletedItself {
+		// we shouldn't write the destroyed peer region state
+
+		// persist to storage
+		meta.WriteRegionState(kvWB, d.Region(), rspb.PeerState_Normal)
+		// update global ctx
+		// TODO not sure
+		d.ctx.storeMeta.regions[d.regionId] = d.peerStorage.region
+	}
+
 	// apply to the raft layer
 	cc := eraftpb.ConfChange{
 		ChangeType: confChange.ChangeType,
@@ -344,6 +363,8 @@ func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry) {
 			d.PeerId(), entry.Term, entry.Index, request.AdminRequest.CmdType)
 		respCb.Done(commandResp)
 	}
+
+	return isNotDeletedItself
 }
 
 func (d *peerMsgHandler) HandleRaftReady() {
@@ -368,16 +389,31 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	entries := ready.CommittedEntries
 	//log.Debugf("%v ready entries size %v commit idx %v", d.PeerId(), len(entries), ready.Commit)
 	for _, entry := range entries {
+		kvWB := &engine_util.WriteBatch{}
+		ok := true
 		if entry.EntryType == eraftpb.EntryType_EntryNormal {
 			//log.Debugf("%v ready: entryNormal, idx %v", d.PeerId(), entry.Index)
 			//DPrintf("%v handle an entry term %v index %v", d.PeerId(), entry.Term, entry.Index)
-			d.processNormalRequest(&entry)
+			d.processNormalRequest(&entry, kvWB)
 		} else if entry.EntryType == eraftpb.EntryType_EntryConfChange {
 			log.Debugf("%v ready: entryConfChange, idx %v", d.PeerId(), entry.Index)
-			d.processConfChangeRequest(&entry)
+			ok = d.processConfChangeRequest(&entry, kvWB)
 		}
-		// update & persist the applied index
-		d.peerStorage.applyState.AppliedIndex = entry.Index
+
+		if ok {
+			// update & persist the applied index
+			d.peerStorage.applyState.AppliedIndex = entry.Index
+			applyKey := meta.ApplyStateKey(d.regionId)
+			kvWB.SetMeta(applyKey, d.peerStorage.applyState)
+			// TODO not sure
+			// delete the stale data
+			log.Debugf("[%v %v] applied advance %v", d.regionId, d.PeerId(), entry.Index)
+			if err := d.ctx.engine.WriteKV(kvWB); err != nil {
+				panic(err)
+			}
+			data, _ := meta.GetRegionLocalState(d.ctx.engine.Kv, d.regionId)
+			log.Debugf("persist region %v", data)
+		}
 	}
 	d.RaftGroup.Advance(ready)
 }
@@ -794,7 +830,7 @@ func (d *peerMsgHandler) destroyPeer() {
 	d.ctx.router.close(regionID)
 	d.stopped = true
 	if isInitialized && meta.regionRanges.Delete(&regionItem{region: d.Region()}) == nil {
-		panic(d.Tag + " meta corruption detected")
+		panic(d.Tag + " meta corruption detected, region id " + strconv.Itoa(int(d.Region().Id)))
 	}
 	if _, ok := meta.regions[regionID]; !ok {
 		panic(d.Tag + " meta corruption detected")

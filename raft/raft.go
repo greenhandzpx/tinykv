@@ -21,7 +21,7 @@ import (
 	"math/rand"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) {
 	if Debug {
@@ -155,6 +155,9 @@ type Raft struct {
 	// pendingTransferring transferring that is pending and leader cannot be proposed
 	pendingTransferring *pb.Message
 
+	// snapshotSendingElapsed the elapsed time from the last time when sending snapshot to one peer
+	snapshotSendingElapsed map[uint64]int
+
 	// heartbeat interval, should send
 	heartbeatTimeout int
 	// baseline of election interval
@@ -199,7 +202,8 @@ func newRaft(c *Config) *Raft {
 		Prs:   make(map[uint64]*Progress),
 		State: StateFollower,
 
-		votes: make(map[uint64]bool),
+		votes:                  make(map[uint64]bool),
+		snapshotSendingElapsed: make(map[uint64]int),
 
 		Lead: uint64(0),
 
@@ -257,6 +261,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 	//		r.id, r.RaftLog.LastIndex(), to, r.Prs[to].Next)
 	//	return false
 	//}
+	log.Debugf("%v send append to %v", r.id, to)
 
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
@@ -288,6 +293,8 @@ func (r *Raft) sendAppend(to uint64) bool {
 			// the next entry has been compacted, we
 			// should send the snapshot
 			msg.MsgType = pb.MessageType_MsgSnapshot
+
+			DPrintf("%v request a snapshot to %v", r.id, to)
 
 			snapshot, err := r.RaftLog.storage.Snapshot()
 			for err != nil {
@@ -377,6 +384,7 @@ func (r *Raft) tick() {
 		if err != nil {
 			// TODO: handle err
 		}
+		r.heartbeatElapsed = 0
 		//r.mu.Lock()
 	}
 }
@@ -724,6 +732,7 @@ func (r *Raft) heartbeat(m pb.Message) {
 			continue
 		}
 		DPrintf("%v send heartbeat to %v", r.id, peer)
+		//log.Debugf("%v send heartbeat to %v", r.id, peer)
 		r.sendHeartbeat(peer)
 	}
 }
@@ -749,7 +758,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	}
 
 	r.resetElectionTimer()
-	DPrintf("%v reset timer because of heartbeat", r.id)
+	//DPrintf("%v reset timer because of heartbeat", r.id)
 
 	r.becomeFollower(m.Term, m.From)
 

@@ -110,6 +110,7 @@ func (d *storeWorker) checkMsg(msg *rspb.RaftMessage) (bool, error) {
 	err := engine_util.GetMeta(d.ctx.engine.Kv, stateKey, localState)
 	if err != nil {
 		if err == badger.ErrKeyNotFound {
+			log.Debugf("%v doesn't have region state key", d.id)
 			return false, nil
 		}
 		return false, err
@@ -129,9 +130,10 @@ func (d *storeWorker) checkMsg(msg *rspb.RaftMessage) (bool, error) {
 			log.Infof("region %d doesn't exist yet, wait for it to be split.", regionID)
 			return true, nil
 		}
+		log.Debugf("local state %v, region %v", localState.State, localState.Region)
 		return false, errors.Errorf("region %d not exists but not tombstone: %s", regionID, localState)
 	}
-	log.Debugf("region %d in tombstone state: %s", regionID, localState)
+	log.Debugf("region %d in tombstone state: %s, peer %v", regionID, localState, d.id)
 	region := localState.Region
 	regionEpoch := region.RegionEpoch
 	// The region in this peer is already destroyed
@@ -154,8 +156,8 @@ func (d *storeWorker) onRaftMessage(msg *rspb.RaftMessage) error {
 	if err := d.ctx.router.send(regionID, message.Msg{Type: message.MsgTypeRaftMessage, Data: msg}); err == nil {
 		return nil
 	}
-	log.Debugf("handle raft message. from_peer:%d, to_peer:%d, store:%d, region:%d, msg:%+v",
-		msg.FromPeer.Id, msg.ToPeer.Id, d.storeState.id, regionID, msg.Message)
+	log.Debugf("%v handle raft message. from_peer:%d, to_peer:%d, store:%d, region:%d, msg:%+v",
+		d.id, msg.FromPeer.Id, msg.ToPeer.Id, d.storeState.id, regionID, msg.Message)
 	if msg.ToPeer.StoreId != d.ctx.store.Id {
 		log.Warnf("store not match, ignore it. store_id:%d, to_store_id:%d, region_id:%d",
 			d.ctx.store.Id, msg.ToPeer.StoreId, regionID)
@@ -199,10 +201,11 @@ func (d *storeWorker) maybeCreatePeer(regionID uint64, msg *rspb.RaftMessage) (b
 	meta.Lock()
 	defer meta.Unlock()
 	if _, ok := meta.regions[regionID]; ok {
+		log.Debugf("%v already exists, no need to create", msg.ToPeer.Id)
 		return true, nil
 	}
 	if !util.IsInitialMsg(msg.Message) {
-		log.Debugf("target peer %s doesn't exist", msg.ToPeer)
+		log.Debugf("target peer %s doesn't exist, msg type %v", msg.ToPeer, msg.Message.MsgType)
 		return false, nil
 	}
 
@@ -220,6 +223,7 @@ func (d *storeWorker) maybeCreatePeer(regionID uint64, msg *rspb.RaftMessage) (b
 	peer, err := replicatePeer(
 		d.ctx.store.Id, d.ctx.cfg, d.ctx.regionTaskSender, d.ctx.engine, regionID, msg.ToPeer)
 	if err != nil {
+		log.Debugf("replicate peer %v error", msg.ToPeer.Id)
 		return false, err
 	}
 	// following snapshot may overlap, should insert into regionRanges after
@@ -227,6 +231,7 @@ func (d *storeWorker) maybeCreatePeer(regionID uint64, msg *rspb.RaftMessage) (b
 	meta.regions[regionID] = peer.Region()
 	d.ctx.router.register(peer)
 	_ = d.ctx.router.send(regionID, message.Msg{Type: message.MsgTypeStart})
+	log.Debugf("create a peer %v because of adding node", msg.ToPeer.Id)
 	return true, nil
 }
 
