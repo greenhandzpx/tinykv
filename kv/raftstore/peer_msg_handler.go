@@ -106,6 +106,7 @@ func (d *peerMsgHandler) processBasicCommandRequest(entry *eraftpb.Entry, reques
 					panic(err)
 				}
 			}
+			iter.Close()
 			txn.Discard()
 		case raft_cmdpb.CmdType_Snap:
 			commandResp.Responses[i].Snap = &raft_cmdpb.SnapResponse{
@@ -223,6 +224,7 @@ func (d *peerMsgHandler) processSplitRequest(entry *eraftpb.Entry, request *raft
 			d.ctx.router.register(peer)
 			// insert this peer's info into StoreMeta
 			d.ctx.storeMeta.setRegion(region, peer)
+			d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: region})
 		}
 
 		/**
@@ -302,6 +304,7 @@ func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry, kvWB *en
 		}
 		if !exists {
 			d.peerStorage.region.Peers = append(d.peerStorage.region.Peers, confChange.Peer)
+			d.insertPeerCache(confChange.Peer)
 			//// register this peer in the router
 			//d.ctx.router.register(confChange.Peer)
 			log.Debugf("%v add a new node %v", d.PeerId(), confChange.Peer.Id)
@@ -316,6 +319,7 @@ func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry, kvWB *en
 				break
 			}
 		}
+		d.removePeerCache(confChange.Peer.Id)
 		log.Debugf("%v delete a node %v", d.PeerId(), confChange.Peer.Id)
 		// TODO not sure here
 		if confChange.Peer.Id == d.PeerId() {
@@ -331,6 +335,8 @@ func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry, kvWB *en
 		// update global ctx
 		// TODO not sure
 		d.ctx.storeMeta.regions[d.regionId] = d.peerStorage.region
+		d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.peerStorage.region})
+		log.Infof("%v update ctx regionRanges %v", d.Tag, d.ctx.storeMeta.regionRanges)
 	}
 
 	// apply to the raft layer
@@ -382,8 +388,22 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	if _, err := d.peerStorage.SaveReadyState(&ready); err != nil {
 		// TODO handle err
 	}
+	// because we may update the region info when invoking SaveReadyState(i.e. applySnapshot)
+	// we should update the ctx region info too
+	ctxRegion := d.ctx.storeMeta.regions[d.regionId]
+	if ctxRegion == nil || ctxRegion.RegionEpoch.Version < d.Region().RegionEpoch.Version ||
+		ctxRegion.RegionEpoch.ConfVer < d.Region().RegionEpoch.ConfVer {
+		log.Debugf("%v update ctx region info", d.Tag)
+		d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
+		if ctxRegion == nil {
+			d.ctx.storeMeta.regions[d.regionId] = d.Region()
+		} else {
+			*ctxRegion = *d.Region()
+		}
+	}
 
-	//log.Debugf("transport %v's msgs, size %v", d.PeerId(), len(ready.Messages))
+	log.Debugf("transport %v's msgs, region epoch %v", d.PeerId(), d.Region())
+
 	d.Send(d.ctx.trans, ready.Messages)
 
 	entries := ready.CommittedEntries
@@ -412,7 +432,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 				panic(err)
 			}
 			data, _ := meta.GetRegionLocalState(d.ctx.engine.Kv, d.regionId)
-			log.Debugf("persist region %v", data)
+			log.Debugf("%v persist region %v", d.PeerId(), data)
 		}
 	}
 	d.RaftGroup.Advance(ready)
@@ -699,6 +719,7 @@ func (d *peerMsgHandler) checkMessage(msg *rspb.RaftMessage) bool {
 	region := d.Region()
 	if util.IsEpochStale(fromEpoch, region.RegionEpoch) && util.FindPeer(region, fromStoreID) == nil {
 		// The message is stale and not in current region.
+		log.Infof("%v's peers %v, fromStoreID %v", d.Tag, region.Peers, fromStoreID)
 		handleStaleMsg(d.ctx.trans, msg, region.RegionEpoch, isVoteMsg)
 		return true
 	}
@@ -725,8 +746,8 @@ func handleStaleMsg(trans Transport, msg *rspb.RaftMessage, curEpoch *metapb.Reg
 	msgType := msg.Message.GetMsgType()
 
 	if !needGC {
-		log.Infof("[region %d] raft message %s is stale, current %v ignore it",
-			regionID, msgType, curEpoch)
+		log.Infof("[region %d] raft message %s is stale, msg %v, current %v ignore it",
+			regionID, msgType, msg.RegionEpoch, curEpoch)
 		return
 	}
 	gcMsg := &rspb.RaftMessage{
@@ -830,6 +851,7 @@ func (d *peerMsgHandler) destroyPeer() {
 	d.ctx.router.close(regionID)
 	d.stopped = true
 	if isInitialized && meta.regionRanges.Delete(&regionItem{region: d.Region()}) == nil {
+		log.Errorf("%v meta corruption detected, region %v", d.Tag, d.Region())
 		panic(d.Tag + " meta corruption detected, region id " + strconv.Itoa(int(d.Region().Id)))
 	}
 	if _, ok := meta.regions[regionID]; !ok {

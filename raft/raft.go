@@ -304,11 +304,15 @@ func (r *Raft) sendAppend(to uint64) bool {
 			msg.Snapshot = &snapshot
 			msg.LogTerm = snapshot.Metadata.Term
 			msg.Index = snapshot.Metadata.Index
+			DPrintf("%v get a snapshot to %v, term %v index %v", r.id, to, msg.LogTerm, msg.Index)
 
 			// TODO not sure
 			// because we don't handle snapshot response,
 			// we just advance the Prs[to] at once
 			r.Prs[to].Next = msg.Index + 1
+
+			// we should try to send again
+			r.sendAppend(to)
 
 		} else {
 			// put all the needed entries into msg
@@ -731,7 +735,7 @@ func (r *Raft) heartbeat(m pb.Message) {
 		if peer == r.id {
 			continue
 		}
-		DPrintf("%v send heartbeat to %v", r.id, peer)
+		//DPrintf("%v send heartbeat to %v", r.id, peer)
 		//log.Debugf("%v send heartbeat to %v", r.id, peer)
 		r.sendHeartbeat(peer)
 	}
@@ -759,8 +763,12 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 
 	r.resetElectionTimer()
 	//DPrintf("%v reset timer because of heartbeat", r.id)
-
-	r.becomeFollower(m.Term, m.From)
+	if m.Term > r.Term {
+		r.Term = m.Term
+	}
+	if r.State != StateFollower {
+		r.State = StateFollower
+	}
 
 	r.msgs = append(r.msgs, msg)
 }
@@ -883,6 +891,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		// maybe the follower's log is far behind the leader,
 		// so we should tell the leader what our last index is to
 		// let leader adjust the nextIndex quickly
+		DPrintf("%v idx %v unavailable", r.id, m.Index)
 		msg.Index = r.RaftLog.LastIndex()
 	} else {
 		if prevTerm == m.LogTerm {
@@ -986,11 +995,6 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		DPrintf("follower %v update commit idx:%v", r.id, r.RaftLog.committed)
 	}
 
-	// TODO stable
-	//r.RaftLog.stabled = r.RaftLog.LastIndex()
-	//r.RaftLog.storage.Append(r.RaftLog.unstableEntries())
-	//msg.LogTerm = r.RaftLog.entries[len(r.RaftLog.entries)-1].Term
-	//msg.Index = r.RaftLog.entries[len(r.RaftLog.entries)-1].Index
 	msg.LogTerm, _ = r.RaftLog.Term(r.RaftLog.LastIndex())
 	msg.Index = r.RaftLog.LastIndex()
 	r.msgs = append(r.msgs, msg)
@@ -1098,7 +1102,8 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 			m.Snapshot.Metadata.Index, r.id, r.RaftLog.committed)
 		return
 	}
-
+	DPrintf("%v get a snapshot term %v idx %v", r.id, m.Snapshot.Metadata.Term,
+		m.Snapshot.Metadata.Index)
 	r.RaftLog.committed = m.Snapshot.Metadata.Index
 	r.RaftLog.stabled = m.Snapshot.Metadata.Index
 	r.RaftLog.applied = m.Snapshot.Metadata.Index

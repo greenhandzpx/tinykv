@@ -350,17 +350,21 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		ps.applyState.TruncatedState.Term = snapshot.Metadata.Term
 		ps.applyState.TruncatedState.Index = snapshot.Metadata.Index
 	}
-	
+	// update region local state
+	ps.region = snapData.Region
 	// update snap state
 	ps.snapState.StateType = snap.SnapState_Applying
+
 	// persist
 	raftStateKey := meta.RaftStateKey(ps.region.Id)
 	raftWB.SetMeta(raftStateKey, ps.raftState)
 	applyStateKey := meta.ApplyStateKey(ps.region.Id)
 	kvWB.SetMeta(applyStateKey, ps.applyState)
+	meta.WriteRegionState(kvWB, ps.Region(), rspb.PeerState_Normal)
+
 	// send the task to region worker
 	notifier := make(chan bool)
-	ps.regionSched <- runner.RegionTaskApply{
+	ps.regionSched <- &runner.RegionTaskApply{
 		RegionId: ps.region.Id,
 		Notifier: notifier,
 		SnapMeta: snapshot.Metadata,
@@ -368,7 +372,9 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		EndKey:   snapData.Region.EndKey,
 	}
 	// block until finishing task
+	//log.Debugf("%v wait for applying snapshot finished", ps.Tag)
 	<-notifier
+	//log.Debugf("%v applying snapshot finished", ps.Tag)
 
 	// TODO not sure
 	ps.clearMeta(kvWB, raftWB)

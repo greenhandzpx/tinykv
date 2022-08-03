@@ -56,16 +56,20 @@ func NewRegionTaskHandler(engines *engine_util.Engines, mgr *snap.SnapManager) *
 }
 
 func (r *regionTaskHandler) Handle(t worker.Task) {
+	log.Infof("handle a region task")
 	switch t.(type) {
 	case *RegionTaskGen:
+		log.Infof("handle region task gen")
 		task := t.(*RegionTaskGen)
 		// It is safe for now to handle generating and applying snapshot concurrently,
 		// but it may not when merge is implemented.
 		r.ctx.handleGen(task.RegionId, task.Notifier)
 	case *RegionTaskApply:
+		log.Infof("handle region task apply")
 		task := t.(*RegionTaskApply)
 		r.ctx.handleApply(task.RegionId, task.Notifier, task.StartKey, task.EndKey, task.SnapMeta)
 	case *RegionTaskDestroy:
+		log.Infof("handle region task destroy")
 		task := t.(*RegionTaskDestroy)
 		r.ctx.cleanUpRange(task.RegionId, task.StartKey, task.EndKey)
 	}
@@ -86,6 +90,7 @@ func (snapCtx *snapContext) handleGen(regionId uint64, notifier chan<- *eraftpb.
 	} else {
 		notifier <- snap
 	}
+	log.Infof("handle gen task finish")
 }
 
 // applySnap applies snapshot data of the Region.

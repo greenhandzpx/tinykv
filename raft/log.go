@@ -126,8 +126,8 @@ func (l *RaftLog) LastIndex() uint64 {
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
 	if len(l.entries) == 0 {
+		log.Debugf("idx %v term %v, l.stabled %v", i, l.lastTerm, l.stabled)
 		if i == l.stabled {
-			//log.Debugf("idx %v term %v", i, l.lastTerm)
 			return l.lastTerm, nil
 		} else if i < l.stabled {
 			return 0, ErrCompacted
