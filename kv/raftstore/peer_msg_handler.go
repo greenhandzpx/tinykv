@@ -319,6 +319,7 @@ func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry, kvWB *en
 				break
 			}
 		}
+		// here is quite important !!!
 		d.removePeerCache(confChange.Peer.Id)
 		log.Debugf("%v delete a node %v", d.PeerId(), confChange.Peer.Id)
 		// TODO not sure here
@@ -402,7 +403,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		}
 	}
 
-	log.Debugf("transport %v's msgs, region epoch %v", d.PeerId(), d.Region())
+	//log.Debugf("transport %v's msgs, region epoch %v", d.PeerId(), d.Region())
 
 	d.Send(d.ctx.trans, ready.Messages)
 

@@ -261,7 +261,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 	//		r.id, r.RaftLog.LastIndex(), to, r.Prs[to].Next)
 	//	return false
 	//}
-	log.Debugf("%v send append to %v", r.id, to)
+	DPrintf("%v send append to %v", r.id, to)
 
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
@@ -769,6 +769,9 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	if r.State != StateFollower {
 		r.State = StateFollower
 	}
+	if r.Lead != m.From {
+		r.Lead = m.From
+	}
 
 	r.msgs = append(r.msgs, msg)
 }
@@ -1159,6 +1162,7 @@ func (r *Raft) handleTransferLeader(m pb.Message) {
 
 	if r.Prs[m.From].Match == r.RaftLog.LastIndex() {
 		// the transferee is up-to-date
+		DPrintf("leader %v transfer to %v, is up-to-date", r.id, m.From)
 		msg := pb.Message{
 			MsgType: pb.MessageType_MsgTimeoutNow,
 			To:      m.From,
@@ -1196,7 +1200,7 @@ func (r *Raft) handleTimeoutNow(m pb.Message) {
 		// this request isn't from the same raft group
 		return
 	}
-
+	DPrintf("%v get a timeout msg", r.id)
 	r.election()
 }
 
