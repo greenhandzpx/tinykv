@@ -114,8 +114,11 @@ func (t *MockTransport) Send(msg *raft_serverpb.RaftMessage) error {
 		fromSnapMgr.Deregister(key, snap.SnapEntrySending)
 	}
 
+	//log.Infof("trans send from %v to %v", fromStore, toStore)
+
 	router, found := t.routers[toStore]
 	if !found {
+		log.Errorf("store %d is closed", toStore)
 		return errors.New(fmt.Sprintf("store %d is closed", toStore))
 	}
 	router.SendRaftMessage(msg)

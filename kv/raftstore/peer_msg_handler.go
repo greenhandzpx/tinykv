@@ -57,7 +57,7 @@ func (d *peerMsgHandler) fetchCallback(term uint64, index uint64) *message.Callb
 		if prop.term == term && prop.index == index {
 			respCb = prop.cb
 			// discard cbs before this cb
-			d.proposals = d.proposals[:i+1]
+			d.proposals = d.proposals[i+1:]
 			break
 		}
 	}
@@ -326,6 +326,9 @@ func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry, kvWB *en
 		if confChange.Peer.Id == d.PeerId() {
 			isNotDeletedItself = false
 			d.destroyPeer()
+			// returning is important!! or we will block
+			log.Debugf("%v delete itself, just return", d.Tag)
+			return isNotDeletedItself
 		}
 	}
 	if isNotDeletedItself {
@@ -335,9 +338,11 @@ func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry, kvWB *en
 		meta.WriteRegionState(kvWB, d.Region(), rspb.PeerState_Normal)
 		// update global ctx
 		// TODO not sure
+		d.ctx.storeMeta.Lock()
 		d.ctx.storeMeta.regions[d.regionId] = d.peerStorage.region
 		d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.peerStorage.region})
 		log.Infof("%v update ctx regionRanges %v", d.Tag, d.ctx.storeMeta.regionRanges)
+		d.ctx.storeMeta.Unlock()
 	}
 
 	// apply to the raft layer
@@ -386,6 +391,10 @@ func (d *peerMsgHandler) HandleRaftReady() {
 
 	ready := d.RaftGroup.Ready()
 
+	//if d.PeerId() == 1 {
+	//	log.Infof("%v before", d.Tag)
+	//}
+
 	if _, err := d.peerStorage.SaveReadyState(&ready); err != nil {
 		// TODO handle err
 	}
@@ -394,6 +403,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	ctxRegion := d.ctx.storeMeta.regions[d.regionId]
 	if ctxRegion == nil || ctxRegion.RegionEpoch.Version < d.Region().RegionEpoch.Version ||
 		ctxRegion.RegionEpoch.ConfVer < d.Region().RegionEpoch.ConfVer {
+
 		log.Debugf("%v update ctx region info", d.Tag)
 		d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
 		if ctxRegion == nil {
@@ -402,6 +412,9 @@ func (d *peerMsgHandler) HandleRaftReady() {
 			*ctxRegion = *d.Region()
 		}
 	}
+	//if d.PeerId() == 1 {
+	//	log.Infof("%v after", d.Tag)
+	//}
 
 	//log.Debugf("transport %v's msgs, region epoch %v", d.PeerId(), d.Region())
 
@@ -434,15 +447,20 @@ func (d *peerMsgHandler) HandleRaftReady() {
 			}
 			data, _ := meta.GetRegionLocalState(d.ctx.engine.Kv, d.regionId)
 			log.Debugf("%v persist region %v", d.PeerId(), data)
+		} else {
+			// means this peer has been deleted
+			return
 		}
 	}
 	d.RaftGroup.Advance(ready)
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
+	//log.Infof("%v get a raft msg", d.Tag)
 	switch msg.Type {
 	case message.MsgTypeRaftMessage:
 		raftMsg := msg.Data.(*rspb.RaftMessage)
+		//log.Infof("%v get a raft msg from %v", d.Tag, raftMsg.FromPeer.Id)
 		if err := d.onRaftMsg(raftMsg); err != nil {
 			log.Errorf("%s handle raft message error %v, msg to: %v", d.Tag, err, raftMsg.ToPeer)
 		}
@@ -691,9 +709,9 @@ func (d *peerMsgHandler) validateRaftMessage(msg *rspb.RaftMessage) bool {
 	return true
 }
 
-/// Checks if the message is sent to the correct peer.
-///
-/// Returns true means that the message can be dropped silently.
+// / Checks if the message is sent to the correct peer.
+// /
+// / Returns true means that the message can be dropped silently.
 func (d *peerMsgHandler) checkMessage(msg *rspb.RaftMessage) bool {
 	fromEpoch := msg.GetRegionEpoch()
 	isVoteMsg := util.IsVoteMessage(msg.Message)

@@ -63,6 +63,7 @@ func (pr *router) send(regionID uint64, msg message.Msg) error {
 	if p == nil || atomic.LoadUint32(&p.closed) == 1 {
 		return errPeerNotFound
 	}
+	//log.Infof("send msg type %v pr %v", msg.Type, pr)
 	pr.peerSender <- msg
 	return nil
 }
@@ -86,6 +87,7 @@ func (r *RaftstoreRouter) Send(regionID uint64, msg message.Msg) error {
 }
 
 func (r *RaftstoreRouter) SendRaftMessage(msg *raft_serverpb.RaftMessage) error {
+	//log.Infof("send from %v to %v", msg.FromPeer.Id, msg.ToPeer.Id)
 	regionID := msg.RegionId
 	if r.router.send(regionID, message.NewPeerMsg(message.MsgTypeRaftMessage, regionID, msg)) != nil {
 		r.router.sendStore(message.NewPeerMsg(message.MsgTypeStoreRaftMessage, regionID, msg))

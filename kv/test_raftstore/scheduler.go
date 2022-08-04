@@ -199,6 +199,8 @@ func (m *MockSchedulerClient) getRegionLocked(key []byte) (*metapb.Region, *meta
 	}
 
 	leader := m.leaders[result.region.GetId()]
+	//log.Infof("leaders %v", m.leaders)
+	//log.Infof("pending peers %v", m.pendingPeers)
 	return &result.region, leader
 }
 

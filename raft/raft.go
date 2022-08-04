@@ -1135,13 +1135,17 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 
 func (r *Raft) handleTransferLeader(m pb.Message) {
 	if _, ok := r.Prs[m.From]; !ok {
+		DPrintf("%v transfer leader to %v not exist", r.id, m.From)
 		return
 	}
 
 	if m.From == r.id && r.State == StateLeader {
 		if r.pendingTransferring != nil {
 			r.pendingTransferring = nil
-
+		}
+		DPrintf("%v transfer leader to itself", r.id)
+		if r.Lead != r.id {
+			r.Lead = r.id
 		}
 		return
 	}
@@ -1157,8 +1161,11 @@ func (r *Raft) handleTransferLeader(m pb.Message) {
 			Term:    r.Term,
 		}
 		r.msgs = append(r.msgs, msg)
+		DPrintf("%v isn't leader but get a transfer leader command", r.id)
 		return
 	}
+
+	DPrintf("%v handle transfer leader to %v", r.id, m.From)
 
 	if r.Prs[m.From].Match == r.RaftLog.LastIndex() {
 		// the transferee is up-to-date
