@@ -288,11 +288,6 @@ func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry, kvWB *en
 	//	panic(err)
 	//}
 
-	// change the region local state (region epoch & peers)
-	d.peerStorage.region.RegionEpoch.ConfVer++
-	log.Debugf("%v region epoch ConfVer %v", d.PeerId(),
-		d.peerStorage.region.RegionEpoch.ConfVer)
-
 	if confChange.ChangeType == eraftpb.ConfChangeType_AddNode {
 		// add node
 		exists := false
@@ -308,27 +303,39 @@ func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry, kvWB *en
 			//// register this peer in the router
 			//d.ctx.router.register(confChange.Peer)
 			log.Debugf("%v add a new node %v", d.PeerId(), confChange.Peer.Id)
+			// change the region local state (region epoch & peers)
+			d.peerStorage.region.RegionEpoch.ConfVer++
+			log.Debugf("%v region epoch ConfVer %v", d.PeerId(),
+				d.peerStorage.region.RegionEpoch.ConfVer)
 		}
 
 	} else if confChange.ChangeType == eraftpb.ConfChangeType_RemoveNode {
 		// remove node
+		exists := false
 		for i, peer := range d.peerStorage.region.Peers {
 			if peer.Id == confChange.Peer.Id {
 				d.peerStorage.region.Peers = append(d.peerStorage.region.Peers[:i],
 					d.peerStorage.region.Peers[i+1:]...)
+				exists = true
 				break
 			}
 		}
-		// here is quite important !!!
-		d.removePeerCache(confChange.Peer.Id)
-		log.Debugf("%v delete a node %v", d.PeerId(), confChange.Peer.Id)
-		// TODO not sure here
-		if confChange.Peer.Id == d.PeerId() {
-			isNotDeletedItself = false
-			d.destroyPeer()
-			// returning is important!! or we will block
-			log.Debugf("%v delete itself, just return", d.Tag)
-			return isNotDeletedItself
+		if exists {
+			// here is quite important !!!
+			d.removePeerCache(confChange.Peer.Id)
+			log.Debugf("%v delete a node %v", d.PeerId(), confChange.Peer.Id)
+			// change the region local state (region epoch & peers)
+			d.peerStorage.region.RegionEpoch.ConfVer++
+			log.Debugf("%v region epoch ConfVer %v", d.PeerId(),
+				d.peerStorage.region.RegionEpoch.ConfVer)
+			// TODO not sure here
+			if confChange.Peer.Id == d.PeerId() {
+				isNotDeletedItself = false
+				d.destroyPeer()
+				// returning is important!! or we will block
+				log.Debugf("%v delete itself, just return", d.Tag)
+				return isNotDeletedItself
+			}
 		}
 	}
 	if isNotDeletedItself {

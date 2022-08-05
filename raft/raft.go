@@ -227,22 +227,22 @@ func newRaft(c *Config) *Raft {
 	raftLog.lastTerm = hardState.Term
 	raft.RaftLog = raftLog
 
-	// restart from snapshot
-	snapshot, err := c.Storage.Snapshot()
-	if err != nil || snapshot.Metadata == nil {
-		log.Debugf("no snapshot in %v", raft.id)
-	} else {
-		if len(snapshot.Metadata.ConfState.Nodes) > 0 {
-			raft.peers = snapshot.Metadata.ConfState.Nodes
-		}
-
-		raft.RaftLog.committed = max(raft.RaftLog.committed, snapshot.Metadata.Index)
-		raft.RaftLog.stabled = max(raft.RaftLog.stabled, snapshot.Metadata.Index)
-		raft.RaftLog.applied = max(raft.RaftLog.applied, snapshot.Metadata.Index)
-		raft.RaftLog.lastTerm = max(raft.RaftLog.lastTerm, snapshot.Metadata.Term)
-		// TODO why not give the snapshot to pendingSnapshot?
-		//raft.RaftLog.pendingSnapshot = &snapshot
-	}
+	//// restart from snapshot
+	//snapshot, err := c.Storage.Snapshot()
+	//if err != nil || snapshot.Metadata == nil {
+	//	log.Debugf("no snapshot in %v", raft.id)
+	//} else {
+	//	if len(snapshot.Metadata.ConfState.Nodes) > 0 {
+	//		raft.peers = snapshot.Metadata.ConfState.Nodes
+	//	}
+	//
+	//	raft.RaftLog.committed = max(raft.RaftLog.committed, snapshot.Metadata.Index)
+	//	raft.RaftLog.stabled = max(raft.RaftLog.stabled, snapshot.Metadata.Index)
+	//	raft.RaftLog.applied = max(raft.RaftLog.applied, snapshot.Metadata.Index)
+	//	raft.RaftLog.lastTerm = max(raft.RaftLog.lastTerm, snapshot.Metadata.Term)
+	//	// TODO why not give the snapshot to pendingSnapshot?
+	//	//raft.RaftLog.pendingSnapshot = &snapshot
+	//}
 
 	for _, peer := range raft.peers {
 		raft.Prs[peer] = &Progress{}
@@ -1060,7 +1060,7 @@ func (r *Raft) checkCommitted() {
 			DPrintf("leader %v advance commit idx: %v", r.id, r.RaftLog.committed)
 			break
 		}
-		DPrintf("%v idx:%v cnt %v", r.id, entry.Index, cnt)
+		//DPrintf("%v idx:%v cnt %v", r.id, entry.Index, cnt)
 	}
 	if find {
 		// broadcast the followers to advance commit index
