@@ -355,7 +355,7 @@ func (r *Raft) tick() {
 
 	r.electionElapsed++
 	r.heartbeatElapsed++
-	if r.electionElapsed == r.electionTimeout {
+	if r.electionElapsed >= r.electionTimeout {
 		DPrintf("%v election timeout", r.id)
 		msg := pb.Message{
 			MsgType: pb.MessageType_MsgHup,
@@ -375,7 +375,7 @@ func (r *Raft) tick() {
 	//if r.State != StateLeader {
 	//	return
 	//}
-	if r.heartbeatElapsed == r.heartbeatTimeout {
+	if r.heartbeatElapsed >= r.heartbeatTimeout {
 		msg := pb.Message{
 			MsgType: pb.MessageType_MsgBeat,
 			To:      r.id,
@@ -648,8 +648,8 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		upToDate = true
 	}
 	if !upToDate {
-		DPrintf("%v(t:%v,i:%v) can't vote for %v(t:%v,i:%v) for not up-to-date",
-			r.id, logTerm, lastIndex, m.From, m.LogTerm, m.Index)
+		DPrintf("%v(t:%v,i:%v) can't vote for %v(t:%v,i:%v) for not up-to-date election elapsed %v, timeout %v",
+			r.id, logTerm, lastIndex, m.From, m.LogTerm, m.Index, r.electionElapsed, r.electionTimeout)
 	}
 	if r.Vote != 0 && r.Vote != m.From {
 		DPrintf("%v can't vote for %v, it has voted for %v",
