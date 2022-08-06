@@ -356,40 +356,41 @@ func (r *Raft) tick() {
 	r.electionElapsed++
 	r.heartbeatElapsed++
 	if r.electionElapsed >= r.electionTimeout {
-		DPrintf("%v election timeout", r.id)
-		msg := pb.Message{
-			MsgType: pb.MessageType_MsgHup,
-			To:      r.id,
-			From:    r.id,
-			Term:    r.Term,
+		if r.State != StateLeader {
+			DPrintf("%v election timeout", r.id)
+			msg := pb.Message{
+				MsgType: pb.MessageType_MsgHup,
+				To:      r.id,
+				From:    r.id,
+				Term:    r.Term,
+			}
+			//r.msgs = append(r.msgs, msg)
+			err := r.Step(msg)
+			if err != nil {
+				// TODO: handle err
+			}
+		} else {
+			r.electionElapsed = 0
 		}
-		//r.msgs = append(r.msgs, msg)
-		//r.mu.Unlock()
-		err := r.Step(msg)
-		if err != nil {
-			// TODO: handle err
-		}
-		//r.mu.Lock()
 	}
-
 	//if r.State != StateLeader {
 	//	return
 	//}
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
-		msg := pb.Message{
-			MsgType: pb.MessageType_MsgBeat,
-			To:      r.id,
-			From:    r.id,
-			Term:    r.Term,
-		}
-		//r.msgs = append(r.msgs, msg)
-		//r.mu.Unlock()
-		err := r.Step(msg)
-		if err != nil {
-			// TODO: handle err
+		if r.State == StateLeader {
+			msg := pb.Message{
+				MsgType: pb.MessageType_MsgBeat,
+				To:      r.id,
+				From:    r.id,
+				Term:    r.Term,
+			}
+			//r.msgs = append(r.msgs, msg)
+			err := r.Step(msg)
+			if err != nil {
+				// TODO: handle err
+			}
 		}
 		r.heartbeatElapsed = 0
-		//r.mu.Lock()
 	}
 }
 

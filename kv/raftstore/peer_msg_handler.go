@@ -188,8 +188,8 @@ func (d *peerMsgHandler) processBasicCommandRequest(entry *eraftpb.Entry, reques
 		respCb.Done(ErrResp(&util.ErrNotLeader{RegionId: d.regionId, Leader: leader}))
 	} else if respCb != nil {
 		if len(request.Requests) > 0 {
-			log.Debugf("[region %v]%v response a command, term %v index %v, first type %v",
-				d.regionId, d.PeerId(), entry.Term, entry.Index, request.Requests[0].CmdType)
+			log.Debugf("[region %v]%v response a command, term %v index %v, first type %v, peer size %v",
+				d.regionId, d.PeerId(), entry.Term, entry.Index, request.Requests[0].CmdType, len(d.Region().Peers))
 		}
 		respCb.Done(commandResp)
 	}
@@ -502,6 +502,9 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	if _, err := d.peerStorage.SaveReadyState(&ready); err != nil {
 		// TODO handle err
 	}
+	if ready.Snapshot.Data != nil {
+		d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
+	}
 	// because we may update the region info when invoking SaveReadyState(i.e. applySnapshot)
 	// we should update the ctx region info too
 	ctxRegion := d.ctx.storeMeta.regions[d.regionId]
@@ -516,9 +519,6 @@ func (d *peerMsgHandler) HandleRaftReady() {
 			*ctxRegion = *d.Region()
 		}
 	}
-	//if d.PeerId() == 1 {
-	//	log.Infof("%v after", d.Tag)
-	//}
 
 	//log.Debugf("transport %v's msgs, region epoch %v", d.PeerId(), d.Region())
 

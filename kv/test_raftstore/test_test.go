@@ -284,6 +284,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			for k := 0; k < j; k++ {
 				key := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", k)
 				cluster.MustDelete([]byte(key))
+				log.Infof("delete key %v", key)
 			}
 		}
 
