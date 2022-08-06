@@ -187,6 +187,7 @@ func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.D
 	startTime := time.Now()
 	for i := 0; i < 10 || time.Since(startTime) < timeout; i++ {
 		region := c.GetRegion(key)
+		log.Infof("get a region %v %v for key %v, req type %v", region.Id, region.RegionEpoch, key, reqs[0].CmdType)
 		regionID := region.GetId()
 		req := NewRequest(regionID, region.RegionEpoch, reqs)
 		resp, txn := c.CallCommandOnLeader(&req, timeout)
@@ -243,8 +244,12 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 			err := resp.Header.Error
 			if err.GetStaleCommand() != nil || err.GetEpochNotMatch() != nil || err.GetNotLeader() != nil {
 				//log.Debugf("encouter retryable err %+v", resp)
+				//if err.GetNotLeader() != nil {
+				//	log.Infof("%v isn't leader", leader)
+				//}
 				if err.GetNotLeader() != nil && err.GetNotLeader().Leader != nil {
 					leader = err.GetNotLeader().Leader
+					log.Infof("leader is %v", leader)
 				} else {
 					leader = c.LeaderOfRegion(regionID)
 				}
@@ -270,6 +275,7 @@ func (c *Cluster) GetRegion(key []byte) *metapb.Region {
 	for i := 0; i < 100; i++ {
 		region, _, _ := c.schedulerClient.GetRegion(context.TODO(), key)
 		if region != nil {
+			log.Infof("get region %v %v for key %v", region.Id, region.RegionEpoch, key)
 			return region
 		}
 		// We may meet range gap after split, so here we will
@@ -375,6 +381,15 @@ func (c *Cluster) Scan(start, end []byte) [][]byte {
 		}
 		region := resp.Responses[0].GetSnap().Region
 		iter := raft_storage.NewRegionReader(txn, *region).IterCF(engine_util.CfDefault)
+		log.Infof("get region %v for key %v(before snap)", region.Id, key)
+
+		region2, _, _ := c.schedulerClient.GetRegion(context.TODO(), key)
+		if region2 != nil {
+			log.Infof("get region %v %v for key %v(after snap)", region.Id, region2.RegionEpoch, key)
+		} else {
+			log.Infof("get no region for key %v(after snap)", key)
+		}
+
 		for iter.Seek(key); iter.Valid(); iter.Next() {
 			if engine_util.ExceedEndKey(iter.Item().Key(), end) {
 				break

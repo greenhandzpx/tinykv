@@ -38,7 +38,7 @@ func (w *Worker) Start(handler TaskHandler) {
 				log.Info("worker stop")
 				return
 			}
-			log.Infof("worker %v get a task", w.name)
+			//log.Infof("worker %v get a task", w.name)
 			handler.Handle(Task)
 		}
 	}()

@@ -356,7 +356,7 @@ func (p *peer) HeartbeatScheduler(ch chan<- worker.Task) {
 	if err != nil {
 		return
 	}
-	log.Infof("%v send a heartbeat, pending peers %v", p.Tag, p.CollectPendingPeers())
+	//log.Infof("[region %v]%v send a heartbeat, pending peers %v", p.regionId, p.Tag, p.CollectPendingPeers())
 	ch <- &runner.SchedulerRegionHeartbeatTask{
 		Region:          clonedRegion,
 		Peer:            p.Meta,

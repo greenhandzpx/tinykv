@@ -468,6 +468,7 @@ func (m *MockSchedulerClient) findRegion(key []byte) *regionItem {
 	item := &regionItem{region: metapb.Region{StartKey: key}}
 
 	var result *regionItem
+	//log.Infof("regionsRange addr in client %v", m.regionsRange)
 	m.regionsRange.DescendLessOrEqual(item, func(i btree.Item) bool {
 		result = i.(*regionItem)
 		return false
