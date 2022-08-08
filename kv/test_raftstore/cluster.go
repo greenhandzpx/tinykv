@@ -187,7 +187,7 @@ func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.D
 	startTime := time.Now()
 	for i := 0; i < 10 || time.Since(startTime) < timeout; i++ {
 		region := c.GetRegion(key)
-		log.Infof("get a region %v %v for key %v, req type %v", region.Id, region.RegionEpoch, key, reqs[0].CmdType)
+		log.Infof("get a region %v %v for key %s, req type %v", region.Id, region.RegionEpoch, hex.EncodeToString(key), reqs[0].CmdType)
 		regionID := region.GetId()
 		req := NewRequest(regionID, region.RegionEpoch, reqs)
 		resp, txn := c.CallCommandOnLeader(&req, timeout)
@@ -249,7 +249,7 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 				//}
 				if err.GetNotLeader() != nil && err.GetNotLeader().Leader != nil {
 					leader = err.GetNotLeader().Leader
-					log.Infof("leader is %v", leader)
+					//log.Infof("leader is %v", leader)
 				} else {
 					leader = c.LeaderOfRegion(regionID)
 				}
@@ -272,16 +272,18 @@ func (c *Cluster) LeaderOfRegion(regionID uint64) *metapb.Peer {
 }
 
 func (c *Cluster) GetRegion(key []byte) *metapb.Region {
+	log.Infof("try to get region for key %s", hex.EncodeToString(key))
 	for i := 0; i < 100; i++ {
 		region, _, _ := c.schedulerClient.GetRegion(context.TODO(), key)
 		if region != nil {
-			log.Infof("get region %v %v for key %v", region.Id, region.RegionEpoch, key)
+			log.Infof("get region %v %v for key %s", region.Id, region.RegionEpoch, hex.EncodeToString(key))
 			return region
 		}
 		// We may meet range gap after split, so here we will
 		// retry to get the region again.
 		SleepMS(20)
 	}
+	//panic(fmt.Sprintf("find no region for %v", key))
 	panic(fmt.Sprintf("find no region for %s", hex.EncodeToString(key)))
 }
 
@@ -307,6 +309,7 @@ func (c *Cluster) MustPut(key, value []byte) {
 }
 
 func (c *Cluster) MustPutCF(cf string, key, value []byte) {
+	log.Debugf("must put key %v value %v", key, value)
 	req := NewPutCfCmd(cf, key, value)
 	resp, _ := c.Request(key, []*raft_cmdpb.Request{req}, 5*time.Second)
 	if resp.Header.Error != nil {
@@ -381,11 +384,11 @@ func (c *Cluster) Scan(start, end []byte) [][]byte {
 		}
 		region := resp.Responses[0].GetSnap().Region
 		iter := raft_storage.NewRegionReader(txn, *region).IterCF(engine_util.CfDefault)
-		log.Infof("get region %v for key %v(before snap)", region.Id, key)
+		log.Infof("get region %v for key %s(before snap)", region.Id, hex.EncodeToString(key))
 
 		region2, _, _ := c.schedulerClient.GetRegion(context.TODO(), key)
 		if region2 != nil {
-			log.Infof("get region %v %v for key %v(after snap)", region.Id, region2.RegionEpoch, key)
+			log.Infof("get region %v %v for key %s(after snap)", region.Id, region2.RegionEpoch, hex.EncodeToString(key))
 		} else {
 			log.Infof("get no region for key %v(after snap)", key)
 		}

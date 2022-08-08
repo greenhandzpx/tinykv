@@ -161,6 +161,7 @@ func (ps *PeerStorage) Snapshot() (eraftpb.Snapshot, error) {
 			}
 		default:
 			// non blocking
+			log.Debugf("%v no snapshot in peer storage", ps.Tag)
 			return snapshot, raft.ErrSnapshotTemporarilyUnavailable
 		}
 		ps.snapState.StateType = snap.SnapState_Relax
@@ -175,6 +176,7 @@ func (ps *PeerStorage) Snapshot() (eraftpb.Snapshot, error) {
 	}
 
 	if ps.snapTriedCnt >= 5 {
+		log.Warnf("failed to get snapshot after %d times", ps.snapTriedCnt)
 		err := errors.Errorf("failed to get snapshot after %d times", ps.snapTriedCnt)
 		ps.snapTriedCnt = 0
 		return snapshot, err
@@ -336,6 +338,11 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 	// and ps.clearExtraData to delete stale data
 	// Your Code Here (2C).
+	if ps.isInitialized() {
+		// TODO not sure
+		ps.clearMeta(kvWB, raftWB)
+		ps.clearExtraData(snapData.Region)
+	}
 
 	// update raft local state
 	if snapshot.Metadata.Index > ps.raftState.LastIndex {
@@ -351,7 +358,10 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		ps.applyState.TruncatedState.Index = snapshot.Metadata.Index
 	}
 	// update region local state
-	ps.region = snapData.Region
+	if snapData.Region.RegionEpoch.ConfVer >= ps.region.RegionEpoch.ConfVer &&
+		snapData.Region.RegionEpoch.Version >= ps.region.RegionEpoch.Version {
+		*ps.region = *snapData.Region
+	}
 	// update snap state
 	ps.snapState.StateType = snap.SnapState_Applying
 
@@ -375,10 +385,6 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	//log.Debugf("%v wait for applying snapshot finished", ps.Tag)
 	<-notifier
 	//log.Debugf("%v applying snapshot finished", ps.Tag)
-
-	// TODO not sure
-	ps.clearMeta(kvWB, raftWB)
-	ps.clearExtraData(ps.region)
 
 	return nil, nil
 }

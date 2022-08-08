@@ -179,6 +179,9 @@ func (l *Logger) logf(t LogType, format string, v ...interface{}) {
 	} else {
 		s = "[" + logStr + "] " + fmt.Sprintf(format, v...)
 	}
+	// remove color
+	s = fmt.Sprintf(format, v...)
+
 	l._log.Output(4, s)
 }
 

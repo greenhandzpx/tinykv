@@ -536,6 +536,33 @@ func TestTransferLeader3B(t *testing.T) {
 	cluster.MustTransferLeader(regionID, NewPeer(5, 5))
 }
 
+func TestMySnap(t *testing.T) {
+	cfg := config.NewTestConfig()
+	cluster := NewTestCluster(5, cfg)
+	cluster.Start()
+	defer cluster.Shutdown()
+
+	cluster.MustTransferLeader(1, NewPeer(1, 1))
+	cluster.MustRemovePeer(1, NewPeer(3, 3))
+
+	time.Sleep(500 * time.Millisecond)
+
+	// add peer (3, 3) to region 1
+	cluster.MustAddPeer(1, NewPeer(3, 3))
+
+	cluster.AddFilter(
+		&PartitionFilter{
+			s1: []uint64{1, 3, 4},
+			s2: []uint64{2, 5},
+		},
+	)
+
+	time.Sleep(500 * time.Millisecond)
+
+	cluster.MustPut([]byte("k3"), []byte("v3"))
+
+}
+
 func TestBasicConfChange3B(t *testing.T) {
 	cfg := config.NewTestConfig()
 	cluster := NewTestCluster(5, cfg)
@@ -663,6 +690,53 @@ func TestConfChangeSnapshotUnreliableRecover3B(t *testing.T) {
 func TestConfChangeSnapshotUnreliableRecoverConcurrentPartition3B(t *testing.T) {
 	// Test: unreliable net, restarts, partitions, snapshots, conf change, many clients (3B) ...
 	GenericTest(t, "3B", 5, true, true, true, 100, true, false)
+}
+
+func MyTest1(t *testing.T) {
+	cfg := config.NewTestConfig()
+	cfg.RegionMaxSize = 800
+	cfg.RegionSplitSize = 500
+	cluster := NewTestCluster(5, cfg)
+	cluster.Start()
+	defer cluster.Shutdown()
+
+	cluster.MustPut([]byte("k1"), []byte("v1"))
+	cluster.MustPut([]byte("k2"), []byte("v2"))
+
+	region := cluster.GetRegion([]byte("k1"))
+	region1 := cluster.GetRegion([]byte("k2"))
+	assert.Equal(t, region.GetId(), region1.GetId())
+
+	cluster.AddFilter(
+		&PartitionFilter{
+			s1: []uint64{1, 2, 3, 4},
+			s2: []uint64{5},
+		},
+	)
+
+	// write some data to trigger split
+	for i := 100; i < 200; i++ {
+		cluster.MustPut([]byte(fmt.Sprintf("k%d", i)), []byte(fmt.Sprintf("v%d", i)))
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	cluster.ClearFilters()
+
+	left := cluster.GetRegion([]byte("k1"))
+	right := cluster.GetRegion([]byte("k2"))
+
+	assert.NotEqual(t, left.GetId(), right.GetId())
+	assert.True(t, bytes.Equal(region.GetStartKey(), left.GetStartKey()))
+	assert.True(t, bytes.Equal(left.GetEndKey(), right.GetStartKey()))
+	assert.True(t, bytes.Equal(right.GetEndKey(), region.GetEndKey()))
+
+	req := NewRequest(left.GetId(), left.GetRegionEpoch(), []*raft_cmdpb.Request{NewGetCfCmd(engine_util.CfDefault, []byte("k2"))})
+	resp, _ := cluster.CallCommandOnLeader(&req, time.Second)
+	assert.NotNil(t, resp.GetHeader().GetError())
+	assert.NotNil(t, resp.GetHeader().GetError().GetKeyNotInRegion())
+
+	MustGetEqual(cluster.engines[5], []byte("k100"), []byte("v100"))
+
 }
 
 func TestOneSplit3B(t *testing.T) {

@@ -49,7 +49,7 @@ func (r *raftLogGCTaskHandler) gcRaftLog(raftDb *badger.DB, regionId, startIdx, 
 	}
 
 	if firstIdx >= endIdx {
-		log.Infof("no need to gc, [regionId: %d]", regionId)
+		//log.Infof("no need to gc, [regionId: %d]", regionId)
 		return 0, nil
 	}
 
@@ -79,12 +79,12 @@ func (r *raftLogGCTaskHandler) Handle(t worker.Task) {
 		log.Errorf("unsupported worker.Task: %+v", t)
 		return
 	}
-	log.Debugf("execute gc log. [regionId: %d, endIndex: %d]", logGcTask.RegionID, logGcTask.EndIdx)
+	//log.Debugf("execute gc log. [regionId: %d, endIndex: %d]", logGcTask.RegionID, logGcTask.EndIdx)
 	collected, err := r.gcRaftLog(logGcTask.RaftEngine, logGcTask.RegionID, logGcTask.StartIdx, logGcTask.EndIdx)
 	if err != nil {
 		log.Errorf("failed to gc. [regionId: %d, collected: %d, err: %v]", logGcTask.RegionID, collected, err)
 	} else {
-		log.Debugf("collected log entries. [regionId: %d, entryCount: %d]", logGcTask.RegionID, collected)
+		//log.Debugf("collected log entries. [regionId: %d, entryCount: %d]", logGcTask.RegionID, collected)
 	}
 	r.reportCollected(collected)
 }

@@ -165,7 +165,9 @@ func (d *peerMsgHandler) processBasicCommandRequest(entry *eraftpb.Entry, reques
 				// we should only handle same version requests
 				log.Debugf("[region %v]%v handle a unmatched snap cmd, request version %v, peer version %v",
 					d.regionId, d.Tag, request.Header.RegionEpoch.Version, d.Region().RegionEpoch.Version)
-				respCb.Done(ErrResp(&util.ErrEpochNotMatch{}))
+				if d.IsLeader() && respCb != nil {
+					respCb.Done(ErrResp(&util.ErrEpochNotMatch{Regions: []*metapb.Region{d.Region()}}))
+				}
 				return
 			}
 			if respCb != nil {
@@ -244,6 +246,19 @@ func (d *peerMsgHandler) processSplitRequest(entry *eraftpb.Entry, request *raft
 	}
 
 	splitRequest := request.AdminRequest.Split
+	if request.Header.RegionEpoch.ConfVer != d.Region().RegionEpoch.ConfVer ||
+		request.Header.RegionEpoch.Version != d.Region().RegionEpoch.Version {
+
+		if !d.IsLeader() && respCb != nil {
+			leaderId := d.LeaderId()
+			leader := d.getPeerFromCache(leaderId)
+			respCb.Done(ErrResp(&util.ErrNotLeader{RegionId: d.regionId, Leader: leader}))
+		} else if respCb != nil {
+			DPrintf("%v response a command, term %v index %v, first type %v",
+				d.PeerId(), entry.Term, entry.Index, request.AdminRequest.CmdType)
+			respCb.Done(ErrResp(&util.ErrEpochNotMatch{Regions: []*metapb.Region{d.Region()}}))
+		}
+	}
 	if engine_util.ExceedEndKey(splitRequest.SplitKey, d.Region().EndKey) {
 		// exceed the current end key
 		commandResp.Header.Error = &errorpb.Error{
@@ -272,6 +287,9 @@ func (d *peerMsgHandler) processSplitRequest(entry *eraftpb.Entry, request *raft
 		}
 		log.Infof("%v old region %v", d.regionId, d.Region())
 		for i, peerID := range splitRequest.NewPeerIds {
+			if i >= len(d.Region().Peers) {
+				break
+			}
 			region.Peers = append(region.Peers, &metapb.Peer{
 				Id:      peerID,
 				StoreId: d.Region().Peers[i].StoreId,
@@ -280,16 +298,19 @@ func (d *peerMsgHandler) processSplitRequest(entry *eraftpb.Entry, request *raft
 		// create the related peer
 		peer, err := createPeer(d.ctx.store.Id, d.ctx.cfg, d.ctx.schedulerTaskSender,
 			d.ctx.engine, region)
-		if err != nil {
-			panic(err)
-		}
-		// register this peer in the router
-		d.ctx.router.register(peer)
 
 		d.ctx.storeMeta.Lock()
-		// insert this peer's info into StoreMeta
-		d.ctx.storeMeta.setRegion(region, peer)
-		d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: region})
+		if err == nil {
+			// because the new region may have fewer peers than old region
+			// so maybe some nodes won't have the new region
+			// 'err != nil' means that this node doesn't have the new region
+
+			// register this peer in the router
+			d.ctx.router.register(peer)
+			// insert this peer's info into StoreMeta
+			d.ctx.storeMeta.setRegion(region, peer)
+			d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: region})
+		}
 		/**
 		modify the origin region(occupy the former half keys)
 		*/
@@ -304,6 +325,8 @@ func (d *peerMsgHandler) processSplitRequest(entry *eraftpb.Entry, request *raft
 			Regions: []*metapb.Region{d.Region(), region},
 		}
 
+		d.ctx.storeMeta.Unlock()
+
 		///** debug **/
 		//log.Infof("%v regionsRange addr in handler %v", d.Tag, d.ctx.storeMeta.regionRanges)
 		//item := &regionItem{region: &metapb.Region{StartKey: oldRegion.StartKey}}
@@ -313,11 +336,12 @@ func (d *peerMsgHandler) processSplitRequest(entry *eraftpb.Entry, request *raft
 		//	return false
 		//})
 		//log.Infof("result %v old %v", result.region, oldRegion)
-		d.ctx.storeMeta.Unlock()
 
 		//if d.IsLeader() {
 		// inform the scheduler that we've split
-		d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
+		if d.IsLeader() {
+			d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
+		}
 		//}
 
 		// persist region info to storage
@@ -415,6 +439,13 @@ func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry, kvWB *en
 			}
 		}
 		if exists {
+			if confChange.Peer.Id == d.PeerId() {
+				isNotDeletedItself = false
+				d.destroyPeer()
+				// returning is important!! or we will block
+				log.Debugf("%v delete itself, just return", d.Tag)
+				return isNotDeletedItself
+			}
 			// here is quite important !!!
 			d.removePeerCache(confChange.Peer.Id)
 			log.Debugf("%v delete a node %v", d.PeerId(), confChange.Peer.Id)
@@ -423,13 +454,6 @@ func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry, kvWB *en
 			log.Debugf("%v region epoch ConfVer %v", d.PeerId(),
 				d.peerStorage.region.RegionEpoch.ConfVer)
 			// TODO not sure here
-			if confChange.Peer.Id == d.PeerId() {
-				isNotDeletedItself = false
-				d.destroyPeer()
-				// returning is important!! or we will block
-				log.Debugf("%v delete itself, just return", d.Tag)
-				return isNotDeletedItself
-			}
 		}
 	}
 	if isNotDeletedItself {
@@ -442,11 +466,13 @@ func (d *peerMsgHandler) processConfChangeRequest(entry *eraftpb.Entry, kvWB *en
 		d.ctx.storeMeta.Lock()
 		d.ctx.storeMeta.regions[d.regionId] = d.peerStorage.region
 		d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.peerStorage.region})
-		log.Infof("%v update ctx regionRanges %v", d.Tag, d.ctx.storeMeta.regionRanges)
+		//log.Infof("%v update ctx regionRanges %v", d.Tag, d.ctx.storeMeta.regionRanges)
 		d.ctx.storeMeta.Unlock()
 
 		// inform the scheduler that we've add/delete a peer
-		d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
+		if d.IsLeader() {
+			d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
+		}
 	}
 
 	// apply to the raft layer
@@ -564,6 +590,7 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 	switch msg.Type {
 	case message.MsgTypeRaftMessage:
 		raftMsg := msg.Data.(*rspb.RaftMessage)
+		// TODO here the raftMsg.Message may be nil pointer when transferring to *rspb.RaftMessage
 		//log.Infof("%v get a raft msg from %v", d.Tag, raftMsg.FromPeer.Id)
 		if err := d.onRaftMsg(raftMsg); err != nil {
 			log.Errorf("%s handle raft message error %v, msg to: %v", d.Tag, err, raftMsg.ToPeer)
@@ -887,6 +914,7 @@ func handleStaleMsg(trans Transport, msg *rspb.RaftMessage, curEpoch *metapb.Reg
 		RegionEpoch: curEpoch,
 		IsTombstone: true,
 	}
+	// TODO RaftMessage.Message is nil pointer here and tran.Send() may cause a null pointer deference
 	if err := trans.Send(gcMsg); err != nil {
 		log.Errorf("[region %d] send message failed %v", regionID, err)
 	}

@@ -1,6 +1,7 @@
 package test_raftstore
 
 import (
+	"github.com/pingcap-incubator/tinykv/log"
 	"math/rand"
 
 	rspb "github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
@@ -31,6 +32,11 @@ func (f *PartitionFilter) Before(msg *rspb.RaftMessage) bool {
 			break
 		}
 	}
+	if inS1 && inS2 {
+		log.Infof("msg is discard between two partitions, s1 %v, s2 %v",
+			f.s1, f.s2)
+	}
+
 	return !(inS1 && inS2)
 }
 

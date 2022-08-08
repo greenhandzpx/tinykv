@@ -290,7 +290,7 @@ func (m *MockSchedulerClient) RegionHeartbeat(req *schedulerpb.RegionHeartbeatRe
 		} else {
 			m.makeRegionHeartbeatResponse(op, resp)
 		}
-		log.Debugf("[region %d] schedule %v", regionID, op)
+		//log.Debugf("[region %d] schedule %v", regionID, op)
 	}
 
 	store := m.stores[req.Leader.GetStoreId()]

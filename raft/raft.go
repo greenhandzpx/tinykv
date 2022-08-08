@@ -21,7 +21,7 @@ import (
 	"math/rand"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) {
 	if Debug {
@@ -158,6 +158,14 @@ type Raft struct {
 	// snapshotSendingElapsed the elapsed time from the last time when sending snapshot to one peer
 	snapshotSendingElapsed map[uint64]int
 
+	//// the cnt of responses in every heartbeat round
+	//heartbeatRespCnt int
+	////
+	//sendHeartbeatElapsed int
+
+	// the elapsed time since last tick from one follower(to decide whether the leader is partitioned)
+	lastTickElapsed map[uint64]int
+
 	// heartbeat interval, should send
 	heartbeatTimeout int
 	// baseline of election interval
@@ -207,6 +215,8 @@ func newRaft(c *Config) *Raft {
 
 		Lead: uint64(0),
 
+		lastTickElapsed: make(map[uint64]int),
+
 		heartbeatTimeout: c.HeartbeatTick,
 		electionTimeout:  c.ElectionTick,
 		heartbeatElapsed: 0,
@@ -246,6 +256,7 @@ func newRaft(c *Config) *Raft {
 
 	for _, peer := range raft.peers {
 		raft.Prs[peer] = &Progress{}
+		raft.lastTickElapsed[peer] = 0
 	}
 
 	DPrintf("create a raft, id %v peers size %v", raft.id, len(raft.peers))
@@ -261,7 +272,6 @@ func (r *Raft) sendAppend(to uint64) bool {
 	//		r.id, r.RaftLog.LastIndex(), to, r.Prs[to].Next)
 	//	return false
 	//}
-	DPrintf("%v send append to %v", r.id, to)
 
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
@@ -270,7 +280,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 		Term:    r.Term,
 		Commit:  r.RaftLog.committed,
 	}
-	if r.RaftLog.LastIndex() < r.Prs[to].Next {
+	if r.RaftLog.LastIndex() < r.Prs[to].Next || r.RaftLog.LastIndex() == r.Prs[to].Match {
 		DPrintf("leader %v no new entries to %v", r.id, to)
 		// we may just send the commit index msg
 		// give the latest entry to the follower to inform it to update commit index
@@ -279,6 +289,9 @@ func (r *Raft) sendAppend(to uint64) bool {
 		msg.Index = r.RaftLog.LastIndex()
 
 	} else {
+
+		DPrintf("%v send append to %v", r.id, to)
+
 		logTerm, err := r.RaftLog.Term(r.Prs[to].Next - 1)
 		if err == ErrCompacted {
 			// the entry before the next entry has been compacted
@@ -297,9 +310,11 @@ func (r *Raft) sendAppend(to uint64) bool {
 			DPrintf("%v request a snapshot to %v", r.id, to)
 
 			snapshot, err := r.RaftLog.storage.Snapshot()
-			for err != nil {
+			if err != nil {
 				// try until the snapshot is available
-				snapshot, err = r.RaftLog.storage.Snapshot()
+				log.Debugf("%v no snapshot yet", r.id)
+				return false
+				//snapshot, err = r.RaftLog.storage.Snapshot()
 			}
 			msg.Snapshot = &snapshot
 			msg.LogTerm = snapshot.Metadata.Term
@@ -311,8 +326,10 @@ func (r *Raft) sendAppend(to uint64) bool {
 			// we just advance the Prs[to] at once
 			r.Prs[to].Next = msg.Index + 1
 
-			// we should try to send again
-			r.sendAppend(to)
+			//r.msgs = append(r.msgs, msg)
+
+			//// we should try to send again
+			//r.sendAppend(to)
 
 		} else {
 			// put all the needed entries into msg
@@ -349,9 +366,6 @@ func (r *Raft) sendHeartbeat(to uint64) {
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
-	// not sure whether we should lock here
-	//r.mu.Lock()
-	//defer r.mu.Unlock()
 
 	r.electionElapsed++
 	r.heartbeatElapsed++
@@ -391,6 +405,25 @@ func (r *Raft) tick() {
 			}
 		}
 		r.heartbeatElapsed = 0
+	}
+
+	if r.State == StateLeader {
+		cnt := 0
+		for peer, _ := range r.lastTickElapsed {
+			if peer == r.id {
+				r.lastTickElapsed[peer] = 0
+			} else {
+				r.lastTickElapsed[peer]++
+			}
+			elp := r.lastTickElapsed[peer]
+			if elp < r.electionTimeout/2 {
+				cnt++
+			}
+		}
+		if cnt <= len(r.peers)/2 {
+			// the leader is partitioned
+			r.State = StateFollower
+		}
 	}
 }
 
@@ -444,6 +477,7 @@ func (r *Raft) becomeLeader() {
 			r.Prs[peer].Match = 0
 		}
 		r.Prs[peer].Next = r.RaftLog.LastIndex() + 1
+		r.lastTickElapsed[peer] = 0
 	}
 
 	// append a noop entry
@@ -785,9 +819,11 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 		r.becomeFollower(m.Term, 0)
 	}
 
-	// every time we receive a heartbeat response, we
-	// try to send that follower a append entry
+	r.lastTickElapsed[m.From] = 0
+
 	// TODO figout out a more efficient way
+	//// every time we receive a heartbeat response, we
+	//// try to send that follower a append entry
 	r.sendAppend(m.From)
 }
 
@@ -1015,6 +1051,8 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		return
 	}
 
+	r.lastTickElapsed[m.From] = 0
+
 	if m.Reject {
 		if m.Index == 0 {
 			r.Prs[m.From].Next = 1
@@ -1026,12 +1064,20 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		return
 	}
 
+	if m.Index <= r.Prs[m.From].Match {
+		return
+	}
 	DPrintf("%v modify follower %v, nextIdx:%v", r.id, m.From, m.Index+1)
 	r.Prs[m.From].Match = m.Index
 	r.Prs[m.From].Next = m.Index + 1
 
 	// check whether there exists any entry that can be committed
 	r.checkCommitted()
+
+	if r.Prs[m.From].Match < r.RaftLog.LastIndex() {
+		// the follower is not up-to-date yet
+		r.sendAppend(m.From)
+	}
 }
 
 func (r *Raft) checkCommitted() {
@@ -1058,7 +1104,7 @@ func (r *Raft) checkCommitted() {
 			find = true
 			r.RaftLog.committed = entry.Index
 			r.commitAdvance = true
-			DPrintf("leader %v advance commit idx: %v", r.id, r.RaftLog.committed)
+			DPrintf("leader %v advance commit idx: %v, cnt %v", r.id, r.RaftLog.committed, cnt)
 			break
 		}
 		//DPrintf("%v idx:%v cnt %v", r.id, entry.Index, cnt)
@@ -1100,10 +1146,20 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 		r.State = StateFollower
 	}
 
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgAppendResponse,
+		To:      m.From,
+		From:    r.id,
+		Term:    m.Term,
+		Reject:  false,
+	}
+
 	if m.Snapshot.Metadata.Index <= r.RaftLog.committed {
 		// the snapshot is stale
 		DPrintf("stale snapshot(idx:%v) in %v(committed:%v)",
 			m.Snapshot.Metadata.Index, r.id, r.RaftLog.committed)
+		msg.Index = r.RaftLog.committed
+		r.msgs = append(r.msgs, msg)
 		return
 	}
 	DPrintf("%v get a snapshot term %v idx %v", r.id, m.Snapshot.Metadata.Term,
@@ -1132,6 +1188,11 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	if r.Lead != m.From {
 		r.Lead = m.From
 	}
+
+	msg.LogTerm, _ = r.RaftLog.Term(r.RaftLog.LastIndex())
+	msg.Index = r.RaftLog.LastIndex()
+	r.msgs = append(r.msgs, msg)
+
 }
 
 func (r *Raft) handleTransferLeader(m pb.Message) {
@@ -1225,12 +1286,14 @@ func (r *Raft) addNode(id uint64) {
 		Match: 0,
 		Next:  r.RaftLog.LastIndex(),
 	}
+	r.lastTickElapsed[id] = 0
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
 	delete(r.Prs, id)
+	delete(r.lastTickElapsed, id)
 	r.peers = r.peers[:0]
 	for peer, _ := range r.Prs {
 		r.peers = append(r.peers, peer)
