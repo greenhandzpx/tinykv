@@ -14,6 +14,7 @@
 package schedulers
 
 import (
+	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/core"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule/operator"
@@ -118,23 +119,47 @@ func (s *balanceRegionScheduler) Schedule(cluster opt.Cluster) *operator.Operato
 	}
 	if regionInfo == nil {
 		// cannot find region that should be removed
+		log.Infof("cannot find region that should be removed")
+		return nil
+	}
+	if len(regionInfo.GetStoreIds()) < cluster.GetMaxReplicas() {
+		// TODO don't know why((
 		return nil
 	}
 	// pick a store to move to
+	storeInfosInRegion := cluster.GetRegionStores(regionInfo)
 	var storeInfoToMove *core.StoreInfo
 	for i := len(storeInfos) - 1; i >= 0; i-- {
+		log.Infof("storeInfo %v", storeInfos[i].GetMeta())
 		if storeInfos[i].DownTime() > cluster.GetMaxStoreDownTime() {
 			// this store may be disconnected
 			continue
 		}
-		if storeInfos[i].GetRegionSize()*2 <= storeInfoMoved.GetRegionSize() {
+		exists := false
+		for _, storeInfo := range storeInfosInRegion {
+			log.Infof("storeInfo in region %v", storeInfo.GetMeta())
+			if storeInfo.GetID() == storeInfos[i].GetID() {
+				exists = true
+				break
+			}
+		}
+		if exists {
+			// this store already has this region
+			// so shouldn't be chosen as the one to move to
+			continue
+		}
+		if storeInfoMoved.GetRegionSize()-storeInfos[i].GetRegionSize() >= regionInfo.GetApproximateSize()*2 {
 			storeInfoToMove = storeInfos[i]
+		} else {
+			log.Infof("%v size not big enough; region size %v, old region size %v, region size %v",
+				storeInfos[i].GetID(), storeInfos[i].GetRegionSize(), storeInfoMoved.GetRegionSize(), regionInfo.GetApproximateSize())
 		}
 		// else: the difference of size between this two stores is not big enough
 		break
 	}
 	if storeInfoToMove == nil {
 		// cannot find a store to move to
+		log.Infof("cannot find a store to move to")
 		return nil
 	}
 	var peerId uint64
@@ -145,10 +170,12 @@ func (s *balanceRegionScheduler) Schedule(cluster opt.Cluster) *operator.Operato
 		}
 	}
 	op, err := operator.CreateMovePeerOperator("transfer a peer",
-		cluster, regionInfo, 0, storeInfoMoved.GetID(), storeInfoToMove.GetID(), peerId)
+		cluster, regionInfo, operator.OpBalance, storeInfoMoved.GetID(), storeInfoToMove.GetID(), peerId)
 	if err != nil {
 		// TODO handle err
+		log.Infof("err %v", err)
 		return nil
 	}
+	log.Infof("op ret %v", op)
 	return op
 }

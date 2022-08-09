@@ -292,7 +292,8 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 		stale := false
 		var err error
 		for _, oldRegion := range regions {
-			if region.GetRegionEpoch() == nil || util.IsEpochStale(region.GetRegionEpoch(), oldRegion.GetRegionEpoch()) {
+			if region.GetRegionEpoch() == nil || (oldRegion.GetRegionEpoch() != nil &&
+				util.IsEpochStale(region.GetRegionEpoch(), oldRegion.GetRegionEpoch())) {
 				stale = true
 				err = ErrRegionIsStale(region.GetMeta(), oldRegion.GetMeta())
 				break

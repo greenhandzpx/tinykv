@@ -14,6 +14,7 @@
 package testutil
 
 import (
+	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule/operator"
 	check "github.com/pingcap/check"
 )
@@ -61,6 +62,7 @@ func CheckTransferPeer(c *check.C, op *operator.Operator, kind operator.OpKind, 
 		kind |= operator.OpLeader
 	}
 	kind |= operator.OpRegion
+	log.Infof("op kind %v, kind %v", op.Kind()&kind, kind)
 	c.Assert(op.Kind()&kind, check.Equals, kind)
 }
 
