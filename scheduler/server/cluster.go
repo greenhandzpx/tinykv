@@ -16,11 +16,13 @@ package server
 import (
 	"context"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
 	"path"
 	"sync"
 	"time"
 
 	"github.com/gogo/protobuf/proto"
+	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/schedulerpb"
 	"github.com/pingcap-incubator/tinykv/scheduler/pkg/logutil"
@@ -30,7 +32,6 @@ import (
 	"github.com/pingcap-incubator/tinykv/scheduler/server/id"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule"
 	"github.com/pingcap/errcode"
-	"github.com/pingcap/log"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
@@ -279,7 +280,60 @@ func (c *RaftCluster) handleStoreHeartbeat(stats *schedulerpb.StoreStats) error 
 // processRegionHeartbeat updates the region information.
 func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	// Your Code Here (3C).
-
+	var oldRegion *core.RegionInfo
+	if oldRegion = c.core.GetRegion(region.GetID()); oldRegion != nil {
+		if util.IsEpochStale(region.GetRegionEpoch(), oldRegion.GetRegionEpoch()) {
+			// this region msg must be stale
+			return ErrRegionIsStale(region.GetMeta(), oldRegion.GetMeta())
+		}
+	} else {
+		// get all regions that overlap with this new region
+		regions := c.core.Regions.GetOverlaps(region)
+		stale := false
+		var err error
+		for _, oldRegion := range regions {
+			if region.GetRegionEpoch() == nil || util.IsEpochStale(region.GetRegionEpoch(), oldRegion.GetRegionEpoch()) {
+				stale = true
+				err = ErrRegionIsStale(region.GetMeta(), oldRegion.GetMeta())
+				break
+			}
+		}
+		if stale {
+			return err
+		}
+	}
+	// then we should decide whether we should update the region info
+	update := false
+	if oldRegion == nil {
+		update = true
+	} else {
+		if oldRegion.GetRegionEpoch().ConfVer < region.GetRegionEpoch().ConfVer ||
+			oldRegion.GetRegionEpoch().Version < region.GetRegionEpoch().Version {
+			update = true
+		} else if oldRegion.GetLeader() != region.GetLeader() {
+			update = true
+		} else if oldRegion.GetPendingPeers() != nil || region.GetPendingPeers() != nil {
+			update = true
+		} else if oldRegion.GetApproximateSize() != region.GetApproximateSize() {
+			update = true
+		}
+	}
+	//log.Infof("region epoch  %v", region.GetRegionEpoch())
+	//if oldRegion != nil {
+	//	log.Infof("old region epoch  %v", oldRegion.GetRegionEpoch())
+	//}
+	if update {
+		c.core.PutRegion(region)
+		for _, peer := range region.GetPeers() {
+			leaderCount := c.core.GetStoreLeaderCount(peer.StoreId)
+			regionCount := c.core.GetStoreRegionCount(peer.StoreId)
+			pendingPeerCount := c.core.GetStorePendingPeerCount(peer.StoreId)
+			leaderSize := c.core.GetStoreLeaderRegionSize(peer.StoreId)
+			regionSize := c.core.GetStoreRegionSize(peer.StoreId)
+			c.core.UpdateStoreStatus(peer.StoreId, leaderCount, regionCount, pendingPeerCount, leaderSize, regionSize)
+		}
+		return nil
+	}
 	return nil
 }
 

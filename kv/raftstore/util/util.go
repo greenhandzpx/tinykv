@@ -3,7 +3,6 @@ package util
 import (
 	"bytes"
 	"fmt"
-
 	"github.com/golang/protobuf/proto"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
