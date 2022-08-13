@@ -7,6 +7,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/storage/raft_storage"
 	"github.com/pingcap-incubator/tinykv/kv/transaction/latches"
 	"github.com/pingcap-incubator/tinykv/kv/transaction/mvcc"
+	"github.com/pingcap-incubator/tinykv/log"
 	coppb "github.com/pingcap-incubator/tinykv/proto/pkg/coprocessor"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/kvrpcpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/tinykvpb"
@@ -69,7 +70,8 @@ func (server *Server) checkLocked(txn *mvcc.MvccTxn, key []byte) (*kvrpcpb.KeyEr
 	if err != nil {
 		return nil, err
 	}
-	if lock != nil {
+	if lock != nil && lock.Ts < txn.StartTS {
+		// TODO don't know why should check the ts
 		// means this key has been locked
 		keyError := &kvrpcpb.KeyError{
 			Locked: &kvrpcpb.LockInfo{
@@ -79,6 +81,7 @@ func (server *Server) checkLocked(txn *mvcc.MvccTxn, key []byte) (*kvrpcpb.KeyEr
 				LockTtl:     lock.Ttl,
 			},
 		}
+		log.Infof("lock already exists ts %v", lock.Ts)
 		return keyError, nil
 	}
 	return nil, nil
@@ -135,40 +138,60 @@ func (server *Server) KvPrewrite(_ context.Context, req *kvrpcpb.PrewriteRequest
 	for i, _ := range keys {
 		keys[i] = req.Mutations[i].Key
 	}
-	keys = append(keys, req.PrimaryLock)
+	//keys = append(keys, req.PrimaryLock)
 	server.Latches.AcquireLatches(keys)
 	defer server.Latches.ReleaseLatches(keys)
 
-	// first prewrite the primary key
-	// check lock
-	keyError, err := server.checkLocked(txn, req.PrimaryLock)
-	if err != nil {
-		return nil, err
-	}
-	resp.Errors = append(resp.Errors, keyError)
-	if keyError != nil {
-		return resp, nil
-	}
+	//// first prewrite the primary key
+	//// check lock
+	//keyError, err := server.checkLocked(txn, req.PrimaryLock)
+	//if err != nil {
+	//	return nil, err
+	//}
+	//if keyError != nil {
+	//	resp.Errors = append(resp.Errors, keyError)
+	//	return resp, nil
+	//}
+
 	// then prewrite all secondary keys
-	// check lock
 	for _, mut := range req.Mutations {
+		// check lock
 		keyError, err := server.checkLocked(txn, mut.Key)
 		if err != nil {
 			return nil, err
 		}
-		resp.Errors = append(resp.Errors, keyError)
 		if keyError != nil {
+			resp.Errors = append(resp.Errors, keyError)
+			return resp, nil
+		}
+		// check write-conflict
+		write, ts, err := txn.MostRecentWrite(mut.Key)
+		if err != nil {
+			return nil, err
+		}
+		if write != nil && ts > req.StartVersion {
+			// write-conflict
+			keyError := &kvrpcpb.KeyError{
+				Conflict: &kvrpcpb.WriteConflict{
+					StartTs:    req.StartVersion,
+					ConflictTs: ts,
+					Key:        mut.Key,
+					Primary:    req.PrimaryLock,
+				},
+			}
+			resp.Errors = append(resp.Errors, keyError)
 			return resp, nil
 		}
 	}
 
-	// lock primary key
-	lockInfo := &mvcc.Lock{
-		Primary: req.PrimaryLock,
-		Ts:      req.StartVersion,
-		Ttl:     req.LockTtl,
-	}
-	txn.PutLock(req.PrimaryLock, lockInfo)
+	//// lock primary key
+	//lockInfo := &mvcc.Lock{
+	//	Primary: req.PrimaryLock,
+	//	Ts:      req.StartVersion,
+	//	Ttl:     req.LockTtl,
+	//}
+	//txn.PutLock(req.PrimaryLock, lockInfo)
+
 	// lock all keys and execute all mutations
 	for _, mut := range req.Mutations {
 		// lock the key
@@ -207,6 +230,7 @@ func (server *Server) KvCommit(_ context.Context, req *kvrpcpb.CommitRequest) (*
 
 	txn, err := server.getTxn(req.StartVersion, req.Context)
 	if err != nil {
+		log.Infof("get txn err %v", err)
 		return nil, err
 	}
 	resp := &kvrpcpb.CommitResponse{}
@@ -218,7 +242,18 @@ func (server *Server) KvCommit(_ context.Context, req *kvrpcpb.CommitRequest) (*
 		}
 		if lock == nil {
 			// the lock has been released
-			// (maybe because of repeated commit)
+			// (maybe because of repeated commit or rollback)
+			write, ts, err := txn.MostRecentWrite(key)
+			if err != nil {
+				return nil, err
+			}
+			if write != nil && ts == req.CommitVersion &&
+				write.Kind == mvcc.WriteKindRollback {
+				resp.Error = &kvrpcpb.KeyError{
+					// TODO not sure
+					Abort: "the txn has rollbacked",
+				}
+			}
 			return resp, nil
 		}
 		if lock.Ts != txn.StartTS {
@@ -239,7 +274,7 @@ func (server *Server) KvCommit(_ context.Context, req *kvrpcpb.CommitRequest) (*
 	if err := server.storage.Write(req.Context, txn.Writes()); err != nil {
 		return nil, err
 	}
-	return nil, nil
+	return resp, nil
 }
 
 func (server *Server) KvScan(_ context.Context, req *kvrpcpb.ScanRequest) (*kvrpcpb.ScanResponse, error) {

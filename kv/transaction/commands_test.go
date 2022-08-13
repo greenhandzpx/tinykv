@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/log"
 	"reflect"
 	"strings"
 	"testing"
@@ -159,6 +160,7 @@ func (builder *testBuilder) prewriteRequest(muts ...*kvrpcpb.Mutation) *kvrpcpb.
 	var req kvrpcpb.PrewriteRequest
 	req.PrimaryLock = []byte{1}
 	req.StartVersion = builder.nextTs()
+	log.Infof("req ts %v", req.StartVersion)
 	req.Mutations = muts
 	return &req
 }
@@ -175,6 +177,7 @@ func (builder *testBuilder) commitRequest(keys ...[]byte) *kvrpcpb.CommitRequest
 	var req kvrpcpb.CommitRequest
 	req.StartVersion = builder.nextTs()
 	req.CommitVersion = builder.prevTs + 10
+	log.Infof("commit ts %v", req.CommitVersion)
 	req.Keys = keys
 	return &req
 }
