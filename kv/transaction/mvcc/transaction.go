@@ -99,6 +99,8 @@ func (txn *MvccTxn) DeleteLock(key []byte) {
 func (txn *MvccTxn) GetValue(key []byte) ([]byte, error) {
 	// Your Code Here (4A).
 	iter := txn.Reader.IterCF(engine_util.CfWrite)
+	defer iter.Close()
+
 	// TODO not sure what the init ts should be
 	for iter.Seek(EncodeKey(key, txn.StartTS)); iter.Valid(); iter.Next() {
 		log.Infof("key.ts %v", decodeTimestamp(iter.Item().Key()))
@@ -148,6 +150,8 @@ func (txn *MvccTxn) DeleteValue(key []byte) {
 func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 	// Your Code Here (4A).
 	iter := txn.Reader.IterCF(engine_util.CfWrite)
+	defer iter.Close()
+
 	// TODO not sure
 	for iter.Seek(EncodeKey(key, math.MaxUint64)); iter.Valid(); iter.Next() {
 		value, err := iter.Item().Value()
@@ -170,6 +174,8 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 func (txn *MvccTxn) MostRecentWrite(key []byte) (*Write, uint64, error) {
 	// Your Code Here (4A).
 	iter := txn.Reader.IterCF(engine_util.CfWrite)
+	defer iter.Close()
+
 	// TODO not sure
 	for iter.Seek(EncodeKey(key, math.MaxUint64)); iter.Valid(); iter.Next() {
 		// should check the bare key first
