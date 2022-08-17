@@ -288,9 +288,11 @@ func (server *Server) KvScan(_ context.Context, req *kvrpcpb.ScanRequest) (*kvrp
 	for i := uint32(0); i < req.Limit; i++ {
 		var key, value []byte
 		if key, value, err = scanner.Next(); err != nil {
+			log.Infof("kvScan break because of err %v", err)
 			return nil, err
 		}
-		if key == nil || value == nil {
+		if key == nil && value == nil {
+			log.Infof("no more kv")
 			break
 		}
 		resp.Pairs = append(resp.Pairs, &kvrpcpb.KvPair{
@@ -312,36 +314,56 @@ func (server *Server) KvCheckTxnStatus(_ context.Context, req *kvrpcpb.CheckTxnS
 		return nil, err
 	}
 	resp := &kvrpcpb.CheckTxnStatusResponse{}
-	if lock == nil {
-		// 1. the lock doesn't exist
-		// maybe 1) the lock has committed 2) the lock is missing
-		write, commitTs, err := txn.CurrentWrite(req.PrimaryKey)
-		if err != nil {
-			return nil, err
-		}
-		if write != nil {
+
+	write, commitTs, err := txn.CurrentWrite(req.PrimaryKey)
+	if err != nil {
+		return nil, err
+	}
+	if write != nil {
+		if write.Kind == mvcc.WriteKindRollback {
+			// 2) the lock has rollback
+			log.Infof("the lock has rollback")
+		} else {
 			// 1) the lock has committed
 			resp.CommitVersion = commitTs
-		} else {
-			// 2) the lock is missing
-			resp.Action = kvrpcpb.Action_LockNotExistRollback
-		}
-	} else {
-		// 2. the lock exists
-		// maybe 1) the lock expires 2) the lock doesn't expire
-		if mvcc.PhysicalTime(req.CurrentTs)-mvcc.PhysicalTime(lock.Ts) >= lock.Ttl {
-			// 1) this lock has expired, we should roll back the lock
-			resp.Action = kvrpcpb.Action_TTLExpireRollback
-			resp.LockTtl = 0
-			// rollback the lock
-			txn.DeleteLock(req.PrimaryKey)
-		} else {
-			// 2) the lock doesn't expire
-			resp.LockTtl = lock.Ttl
 		}
 
+	} else {
+		if lock == nil {
+			// 3) the lock is missing
+			resp.Action = kvrpcpb.Action_LockNotExistRollback
+			txn.PutWrite(req.PrimaryKey, req.LockTs, &mvcc.Write{
+				StartTS: req.LockTs,
+				Kind:    mvcc.WriteKindRollback,
+			})
+			//log.Infof("writes size %v", len(txn.Writes()))
+		} else {
+			// 2. the lock exists
+			// maybe 1) the lock expires 2) the lock doesn't expire
+			if mvcc.PhysicalTime(req.CurrentTs)-mvcc.PhysicalTime(lock.Ts) >= lock.Ttl {
+				// 1) this lock has expired, we should roll back the lock
+				resp.Action = kvrpcpb.Action_TTLExpireRollback
+				resp.LockTtl = 0
+				// rollback the lock
+				txn.DeleteLock(req.PrimaryKey)
+				// delete the value
+				txn.DeleteValue(req.PrimaryKey)
+				// record a rollback write
+				txn.PutWrite(req.PrimaryKey, lock.Ts, &mvcc.Write{
+					StartTS: lock.Ts,
+					Kind:    mvcc.WriteKindRollback,
+				})
+			} else {
+				// 2) the lock doesn't expire
+				resp.LockTtl = lock.Ttl
+			}
+		}
+		if err := server.storage.Write(req.Context, txn.Writes()); err != nil {
+			log.Infof("write to db error")
+			return nil, err
+		}
 	}
-	return nil, nil
+	return resp, nil
 }
 
 func (server *Server) KvBatchRollback(_ context.Context, req *kvrpcpb.BatchRollbackRequest) (*kvrpcpb.BatchRollbackResponse, error) {
@@ -354,6 +376,24 @@ func (server *Server) KvBatchRollback(_ context.Context, req *kvrpcpb.BatchRollb
 	resp := &kvrpcpb.BatchRollbackResponse{}
 	// check whether the key is still locked by this txn
 	for _, key := range req.Keys {
+		write, _, err := txn.CurrentWrite(key)
+		if err != nil {
+			return nil, err
+		}
+		if write != nil {
+			if write.Kind == mvcc.WriteKindRollback {
+				// means this key has rollback
+				continue
+			} else {
+				// means this key has committed
+				resp.Error = &kvrpcpb.KeyError{
+					Abort: "the key has been committed",
+				}
+				log.Infof("the key has been committed")
+				return resp, nil
+			}
+		}
+
 		lock, err := txn.GetLock(key)
 		if err != nil {
 			return nil, err
@@ -368,29 +408,24 @@ func (server *Server) KvBatchRollback(_ context.Context, req *kvrpcpb.BatchRollb
 		}
 		if lock.Ts != req.StartVersion {
 			// this lock isn't held by this txn
-			resp.Error = &kvrpcpb.KeyError{
-				Abort: "the lock is locked by another txn",
-			}
-			return resp, nil
-		}
-		write, _, err := txn.CurrentWrite(key)
-		if err != nil {
-			return nil, err
-		}
-		if write != nil {
-			// means this key has committed
-			resp.Error = &kvrpcpb.KeyError{
-				Abort: "the key has been committed",
-			}
-			return resp, nil
+			log.Infof("the lock is locked by another txn")
+			// TODO not sure just continue
+			//continue
+			//resp.Error = &kvrpcpb.KeyError{
+			//	Abort: "the lock is locked by another txn",
+			//}
+			//return resp, nil
+		} else {
+			// TODO not sure
+			// if the lock is exactly held by this txn
+			txn.DeleteLock(key)
 		}
 		// TODO not sure rollback write's commit version
 		txn.PutWrite(key, req.StartVersion, &mvcc.Write{
 			StartTS: req.StartVersion,
 			Kind:    mvcc.WriteKindRollback,
 		})
-		// then we can delete the lock and the value
-		txn.DeleteLock(key)
+		// then we can delete the value
 		// TODO not sure
 		txn.DeleteValue(key)
 	}
@@ -431,7 +466,7 @@ func (server *Server) KvResolveLock(_ context.Context, req *kvrpcpb.ResolveLockR
 	}
 	iter.Close()
 
-	resp := kvrpcpb.ResolveLockResponse{}
+	resp := &kvrpcpb.ResolveLockResponse{}
 	if req.CommitVersion == 0 {
 		// rollback txn
 		// TODO not sure
@@ -461,7 +496,7 @@ func (server *Server) KvResolveLock(_ context.Context, req *kvrpcpb.ResolveLockR
 		resp.Error = commitResp.Error
 
 	}
-	return nil, nil
+	return resp, nil
 }
 
 // SQL push down commands.

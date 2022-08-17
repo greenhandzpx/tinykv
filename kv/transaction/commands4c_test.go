@@ -2,6 +2,7 @@ package transaction
 
 import (
 	"encoding/binary"
+	"github.com/pingcap-incubator/tinykv/log"
 	"testing"
 
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
@@ -118,7 +119,7 @@ func TestRollbackDuplicate4C(t *testing.T) {
 func TestRollbackOtherTxn4C(t *testing.T) {
 	builder := newBuilder(t)
 	cmd := builder.rollbackRequest([]byte{3})
-
+	log.Infof("cmd ts %v", cmd.StartVersion)
 	builder.init([]kv{
 		{cf: engine_util.CfDefault, key: []byte{3}, ts: 80, value: []byte{42}},
 		{cf: engine_util.CfLock, key: []byte{3}, value: []byte{1, 1, 0, 0, 0, 0, 0, 0, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0}},
@@ -172,7 +173,7 @@ func TestCheckTxnStatusTtlNotExpired4C(t *testing.T) {
 	})
 }
 
-// TestCheckTxnStatusRolledBack4C tests checking a key which has already been rolled back..
+// TestCheckTxnStatusRolledBack4C tests checking a key which has already been rolled back.
 func TestCheckTxnStatusRolledBack4C(t *testing.T) {
 	builder := newBuilder(t)
 	cmd := builder.checkTxnStatusRequest([]byte{3})
@@ -371,7 +372,7 @@ func TestScanAll4C(t *testing.T) {
 
 	cmd := builder.scanRequest([]byte{0}, 10000)
 	resp := builder.runOneRequest(cmd).(*kvrpcpb.ScanResponse)
-
+	log.Infof("cmd ts %v", cmd.Version)
 	assert.Nil(t, resp.RegionError)
 	assert.Equal(t, 11, len(resp.Pairs))
 	assert.Equal(t, []byte{1}, resp.Pairs[0].Key)

@@ -51,8 +51,8 @@ func (txn *MvccTxn) PutWrite(key []byte, ts uint64, write *Write) {
 		Value: write.ToBytes(),
 		Cf:    engine_util.CfWrite,
 	}
+	log.Infof("put a write value %v", write.ToBytes())
 	txn.writes = append(txn.writes, storage.Modify{Data: put})
-	log.Infof("put a write %v", write.Kind)
 }
 
 // GetLock returns a lock if key is locked. It will return (nil, nil) if there is no lock on key, and (nil, err)
