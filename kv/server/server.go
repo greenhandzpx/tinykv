@@ -243,11 +243,11 @@ func (server *Server) KvCommit(_ context.Context, req *kvrpcpb.CommitRequest) (*
 		if lock == nil {
 			// the lock has been released
 			// (maybe because of repeated commit or rollback)
-			write, ts, err := txn.MostRecentWrite(key)
+			write, _, err := txn.MostRecentWrite(key)
 			if err != nil {
 				return nil, err
 			}
-			if write != nil && ts == req.CommitVersion &&
+			if write != nil &&
 				write.Kind == mvcc.WriteKindRollback {
 				resp.Error = &kvrpcpb.KeyError{
 					// TODO not sure
@@ -359,7 +359,11 @@ func (server *Server) KvBatchRollback(_ context.Context, req *kvrpcpb.BatchRollb
 			return nil, err
 		}
 		if lock == nil {
-			// TODO handle not locked
+			// TODO not sure rollback write's commit version
+			txn.PutWrite(key, req.StartVersion, &mvcc.Write{
+				StartTS: req.StartVersion,
+				Kind:    mvcc.WriteKindRollback,
+			})
 			continue
 		}
 		if lock.Ts != req.StartVersion {
@@ -380,6 +384,11 @@ func (server *Server) KvBatchRollback(_ context.Context, req *kvrpcpb.BatchRollb
 			}
 			return resp, nil
 		}
+		// TODO not sure rollback write's commit version
+		txn.PutWrite(key, req.StartVersion, &mvcc.Write{
+			StartTS: req.StartVersion,
+			Kind:    mvcc.WriteKindRollback,
+		})
 		// then we can delete the lock and the value
 		txn.DeleteLock(key)
 		// TODO not sure
